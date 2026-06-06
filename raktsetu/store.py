@@ -22,6 +22,7 @@ import pandas as pd
 from boto3.dynamodb.conditions import Key
 
 from . import config
+from . import engagement_adapter as adapt
 
 _session = boto3.session.Session(region_name=config.AWS_REGION)
 _ddb = _session.resource("dynamodb")
@@ -192,52 +193,105 @@ def load_donors_df(ref_date: str | None = None) -> pd.DataFrame:
     ref = pd.Timestamp(ref_date or config.REFERENCE_DATE)
     rows = []
     for it in _scan_profiles(config.TABLE_DONORS):
-        last_contact = _date(it.get("lastContactedDate"))
-        rows.append({
-            "user_id": it.get("donorId"),
-            "name": it.get("name"),
-            "blood_group_norm": it.get("bloodGroup"),
-            "role": it.get("role"),
-            "donor_type": it.get("donorType"),
-            "latitude": _num(it.get("latitude")),
-            "longitude": _num(it.get("longitude")),
-            "eligibility_status": it.get("eligibilityStatus"),
-            "next_eligible_date": _date(it.get("nextEligibleDate")),
-            "last_donation_date": _date(it.get("lastDonationDate")),
-            "last_contacted_date": last_contact,
-            "days_since_last_contact": (ref - last_contact).days if pd.notna(last_contact) else np.nan,
-            "frequency_in_days": _num(it.get("frequencyInDays"), 0.0),
-            "donations_till_date": _num(it.get("donationsTillDate"), 0.0),
-            "no_shows": _num(it.get("noShows"), 0.0),
-            "show_rate": _num(it.get("showRate"), 0.8),
-            "reliability_score": _num(it.get("reliabilityScore"), 0.5),
-            "willingness": _num(it.get("willingnessScore"), np.nan),
-            "user_donation_active_status": it.get("userDonationActiveStatus"),
-            "city": it.get("city"),
-            "bridge_id": it.get("currentBridgeId"),
-        })
+        row = adapt.donor_row(it, ref)
+        if row is None:
+            continue
+        last_contact = row.get("last_contacted_date")
+        if pd.notna(last_contact):
+            row["days_since_last_contact"] = (ref - last_contact).days
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["user_id"])
     return pd.DataFrame(rows)
 
 
 def load_patients_df() -> pd.DataFrame:
     """Read Patients profile items into the pipeline's patient DataFrame shape."""
+    request_items = _scan_table(config.TABLE_REQUESTS) if _table_exists(config.TABLE_REQUESTS) else []
+    coords = adapt.request_coords_by_patient(request_items)
     rows = []
     for it in _scan_profiles(config.TABLE_PATIENTS):
-        rows.append({
-            "user_id": it.get("patientId"),
-            "name": it.get("name"),
-            "blood_group_norm": it.get("bloodGroup"),
-            "bridge_blood_group_norm": it.get("bridgeBloodGroup") or it.get("bloodGroup"),
-            "latitude": _num(it.get("latitude")),
-            "longitude": _num(it.get("longitude")),
-            "frequency_in_days": _num(it.get("frequencyInDays"), np.nan),
-            "last_transfusion_date": _date(it.get("lastTransfusionDate")),
-            "expected_next_transfusion_date": _date(it.get("expectedNextTransfusionDate")),
-            "quantity_required": _num(it.get("quantityRequired"), 1.0),
-            "city": it.get("city"),
-            "bridge_id": it.get("bridgeId"),
-        })
+        rows.append(adapt.patient_row(it, coords))
+    if not rows:
+        return pd.DataFrame(columns=["user_id"])
     return pd.DataFrame(rows)
+
+
+def _table_exists(name: str) -> bool:
+    try:
+        _ddb.meta.client.describe_table(TableName=name)
+        return True
+    except Exception:
+        return False
+
+
+def _scan_table(table_name: str) -> list[dict]:
+    table = _ddb.Table(table_name)
+    items, kwargs = [], {}
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return items
+
+
+def load_open_requests(limit: int = 20) -> list[dict]:
+    """Open blood requests from the automation portal (for admin visibility)."""
+    if not _table_exists(config.TABLE_REQUESTS):
+        return []
+    open_status = {"open", "outreach_started"}
+    rows = []
+    for it in _scan_table(config.TABLE_REQUESTS):
+        if it.get("SK") != "REQUEST":
+            continue
+        if str(it.get("status", "")).lower() not in open_status:
+            continue
+        rows.append({
+            "requestId": it.get("requestId"),
+            "patientId": it.get("patientId"),
+            "patientName": it.get("patientName"),
+            "bloodGroup": it.get("bloodGroup"),
+            "hospital": it.get("hospital"),
+            "city": it.get("city"),
+            "requiredBy": it.get("requiredBy"),
+            "urgencyLevel": it.get("urgencyLevel"),
+            "status": it.get("status"),
+            "unitsNeeded": it.get("unitsNeeded"),
+        })
+    rows.sort(key=lambda r: str(r.get("requiredBy") or ""))
+    return rows[:limit]
+
+
+def link_patient_bridge(patient_id: str, bridge_id: str) -> None:
+    """Mark a patient as bridged (automation + intelligence schema)."""
+    table = _ddb.Table(config.TABLE_PATIENTS)
+    table.update_item(
+        Key={"patientId": patient_id, "SK": config.PROFILE_SK},
+        UpdateExpression="SET bridgeId = :b, updatedAt = :u",
+        ExpressionAttributeValues={
+            ":b": bridge_id,
+            ":u": pd.Timestamp.utcnow().isoformat(),
+        },
+    )
+
+
+def persist_bridge_plan(plan, status_for_meta: str = "FORMING") -> int:
+    """Write bridge META + VACANT slots from a BridgePlan dataclass."""
+    put_bridge_meta(plan.bridge_id, plan.patient_id,
+                    status=status_for_meta, bloodGroup=plan.blood_group,
+                    coverage=plan.coverage)
+    vacant = 0
+    for slot in plan.slots:
+        put_slot(plan.bridge_id, slot.slot_id, slot.slot_type, "VACANT",
+                 donor_id=slot.donor_id, score=slot.score,
+                 reason=slot.reason, candidate_queue=plan.candidate_queue,
+                 patient_id=plan.patient_id, backup_for=slot.backup_for)
+        vacant += 1
+    link_patient_bridge(plan.patient_id, plan.bridge_id)
+    return vacant
 
 
 # --------------------------------------------------------------------------

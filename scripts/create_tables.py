@@ -78,6 +78,38 @@ def main():
         }],
     )
 
+    # Automation / WhatsApp portal tables (same STAGE suffix as intelligence layer).
+    stage = config.STAGE
+    _create(
+        f"raktsetu-conversations-{stage}",
+        attrs=[{"AttributeName": "phone_number", "AttributeType": "S"}],
+        keys=[{"AttributeName": "phone_number", "KeyType": "HASH"}],
+    )
+    _create(
+        config.TABLE_REQUESTS,
+        attrs=[{"AttributeName": "requestId", "AttributeType": "S"},
+               {"AttributeName": "SK", "AttributeType": "S"}],
+        keys=[{"AttributeName": "requestId", "KeyType": "HASH"},
+              {"AttributeName": "SK", "KeyType": "RANGE"}],
+    )
+    _create(
+        config.TABLE_APPOINTMENTS,
+        attrs=[{"AttributeName": "appointmentId", "AttributeType": "S"},
+               {"AttributeName": "SK", "AttributeType": "S"}],
+        keys=[{"AttributeName": "appointmentId", "KeyType": "HASH"},
+              {"AttributeName": "SK", "KeyType": "RANGE"}],
+    )
+    _create(
+        f"raktsetu-waitlist-{stage}",
+        attrs=[{"AttributeName": "phone", "AttributeType": "S"}],
+        keys=[{"AttributeName": "phone", "KeyType": "HASH"}],
+    )
+    _create(
+        f"raktsetu-processedMessages-{stage}",
+        attrs=[{"AttributeName": "messageId", "AttributeType": "S"}],
+        keys=[{"AttributeName": "messageId", "KeyType": "HASH"}],
+    )
+
     print("Done.")
 
 

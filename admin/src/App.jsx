@@ -127,6 +127,7 @@ export default function App() {
   const [bridges, setBridges] = useState(null);
   const [unbridged, setUnbridged] = useState(null);
   const [atRisk, setAtRisk] = useState(null);
+  const [requests, setRequests] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -141,15 +142,31 @@ export default function App() {
   async function refresh() {
     setLoading(true); setError(null);
     try {
-      const d = await api.dashboard(12);
+      const [d, req] = await Promise.all([api.dashboard(12), api.requests(10)]);
       setStats(d.stats);
       setBridges(d.bridges);
       setUnbridged(d.unbridged);
       setAtRisk(d.atRisk);
+      setRequests(req);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleFormBridge(p) {
+    setError(null);
+    try {
+      const res = await api.formBridge(p.patientId);
+      if (!res.ok) {
+        setError(`No bridge formed: ${res.reason || "no candidates"} (pool ${res.coverage ?? 0})`);
+        return;
+      }
+      setSelected({ ...p, bridgeId: res.bridgeId, formed: true });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
     }
   }
   useEffect(() => { refresh(); }, []);
@@ -258,9 +275,13 @@ export default function App() {
                     <td className="text-right">{p.candidatePool}</td>
                     <td className="text-right">{p.topScore?.toFixed(2) ?? "—"}</td>
                     <td className="text-right">
-                      <button onClick={() => setSelected(p)}
+                      <button onClick={() => handleFormBridge(p)}
                         className="px-3 py-1 rounded-lg bg-brand hover:bg-brand-dark text-white text-xs font-semibold transition-colors">
                         Form bridge
+                      </button>
+                      <button onClick={() => setSelected(p)}
+                        className="ml-2 px-3 py-1 rounded-lg border border-line text-xs font-semibold text-muted hover:text-ink">
+                        Preview
                       </button>
                     </td>
                   </tr>
@@ -296,6 +317,35 @@ export default function App() {
             </table>
           </Section>
         </div>
+
+        <Section title="Open blood requests (WhatsApp / portal)"
+          sub="Live requests from patient onboarding — donors registered via the bot appear in matching below.">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thCls}>
+                <th className="text-left py-2 font-semibold">Patient</th>
+                <th>Group</th>
+                <th className="text-left">Hospital</th>
+                <th className="text-right">Required by</th>
+                <th className="text-center">Urgency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(requests?.requests || []).map((r) => (
+                <tr key={r.requestId} className="border-t border-line">
+                  <td className="py-2.5 text-ink font-medium">{r.patientName || shortId(r.patientId)}</td>
+                  <td className="text-center"><GroupTag g={r.bloodGroup} /></td>
+                  <td className="text-muted">{r.hospital}{r.city ? ` · ${r.city}` : ""}</td>
+                  <td className="text-right text-muted">{r.requiredBy || "—"}</td>
+                  <td className="text-center text-xs uppercase">{r.urgencyLevel || "—"}</td>
+                </tr>
+              ))}
+              {requests && requests.requests.length === 0 && (
+                <tr><td colSpan="5" className="py-4 text-center text-muted">No open requests</td></tr>
+              )}
+            </tbody>
+          </table>
+        </Section>
 
         <Section title="Bridge health"
           sub="Active bar: red (&lt;6) · yellow (6–8) · green (9–10). Buffer (amber) · vacant (grey). Target = 10 donors.">

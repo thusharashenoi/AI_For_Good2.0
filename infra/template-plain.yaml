@@ -72,6 +72,7 @@ Resources:
           DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
           DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
           CACHE_TTL: "120"
+          LIVE_ELIGIBILITY: "1"
           PLANNER_MOBILIZE: !Ref PlannerMobilize
 
   GetNextDonorFunction:
@@ -95,6 +96,7 @@ Resources:
           DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
           DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
           CACHE_TTL: "120"
+          LIVE_ELIGIBILITY: "1"
           PLANNER_MOBILIZE: !Ref PlannerMobilize
 
   BridgePlannerFunction:
@@ -118,6 +120,7 @@ Resources:
           DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
           DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
           CACHE_TTL: "120"
+          LIVE_ELIGIBILITY: "1"
           PLANNER_MOBILIZE: !Ref PlannerMobilize
 
   BridgePlannerSchedule:
@@ -160,6 +163,7 @@ Resources:
           DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
           DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
           CACHE_TTL: "120"
+          LIVE_ELIGIBILITY: "1"
           PLANNER_MOBILIZE: !Ref PlannerMobilize
 
   AdminHttpApi:

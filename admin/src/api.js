@@ -25,6 +25,8 @@ async function post(path, body) {
 export const api = {
   dashboard: (atRiskLimit = 12) => get(`/dashboard?at_risk_limit=${atRiskLimit}`),
   stats: () => get("/stats"),
+  requests: (limit = 20) => get(`/requests?limit=${limit}`),
+  formBridge: (patientId) => post(`/bridges/form/${patientId}`, {}),
   bridges: () => get("/bridges"),
   bridge: (id) => get(`/bridges/${id}`),
   unbridged: () => get("/unbridged"),

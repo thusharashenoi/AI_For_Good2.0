@@ -1,0 +1,417 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-09
+Description: >
+  RaktSetu Autonomous Donor & Patient Engagement System — WhatsApp + Voice bot
+  on Lambda + Twilio + Bedrock, with Step Functions outreach orchestration,
+  EventBridge schedules, and DynamoDB state.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+  SecretsManagerSecretId:
+    Type: String
+    Default: raktsetu/config
+    Description: Secrets Manager secret holding Twilio/Bedrock config (JSON).
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 512
+    Architectures: [arm64]
+    # Bundle the whole project so `shared` and `lambdas.*` are importable.
+    CodeUri: ../
+    Environment:
+      Variables:
+        AWS_REGION_NAME: !Ref AWS::Region
+        SECRETS_MANAGER_SECRET_ID: !Ref SecretsManagerSecretId
+        DYNAMODB_TABLE_CONVERSATIONS: !Ref ConversationsTable
+        DYNAMODB_TABLE_DONORS: !Ref DonorsTable
+        DYNAMODB_TABLE_PATIENTS: !Ref PatientsTable
+        DYNAMODB_TABLE_REQUESTS: !Ref RequestsTable
+        DYNAMODB_TABLE_APPOINTMENTS: !Ref AppointmentsTable
+        DYNAMODB_TABLE_WAITLIST: !Ref WaitlistTable
+        DYNAMODB_TABLE_PROCESSED_MESSAGES: !Ref ProcessedMessagesTable
+        OUTREACH_STATE_MACHINE_ARN: !Ref OutreachStateMachine
+        FOLLOW_UP_ARN: !GetAtt FollowUpRegistrationFunction.Arn
+        APPOINTMENT_REMINDER_ARN: !GetAtt AppointmentReminderFunction.Arn
+        THREE_HOUR_REMINDER_ARN: !GetAtt ThreeHourReminderFunction.Arn
+        SCHEDULER_GROUP_NAME: !Ref SchedulerGroup
+        SCHEDULER_ROLE_ARN: !GetAtt SchedulerInvokeRole.Arn
+
+Resources:
+  # ---------------- DynamoDB ----------------
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-conversations-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: phone_number, AttributeType: S}
+      KeySchema:
+        - {AttributeName: phone_number, KeyType: HASH}
+
+  DonorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-donors-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: donorId, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: donorId, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-patients-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: patientId, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: patientId, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+
+  RequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-bloodRequests-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: requestId, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: requestId, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-appointments-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: appointmentId, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: appointmentId, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+
+  WaitlistTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-waitlist-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: phone, AttributeType: S}
+      KeySchema:
+        - {AttributeName: phone, KeyType: HASH}
+
+  ProcessedMessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-processedMessages-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: messageId, AttributeType: S}
+      KeySchema:
+        - {AttributeName: messageId, KeyType: HASH}
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ---------------- HTTP API (Twilio webhooks) ----------------
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+
+  # ---------------- Lambda functions ----------------
+  WhatsappWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-whatsapp-webhook-${Stage}
+      Handler: lambdas.whatsapp_webhook.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Path: /whatsapp
+            Method: POST
+
+  PeriskopeWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-periskope-webhook-${Stage}
+      Handler: lambdas.periskope_webhook.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /periskope, Method: POST}
+
+  VapiToolsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-vapi-tools-${Stage}
+      Handler: lambdas.vapi_tools.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Tools:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /vapi/tools, Method: POST}
+
+  VoiceInboundFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-voice-inbound-${Stage}
+      Handler: lambdas.voice_inbound.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Inbound:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /voice/inbound, Method: POST}
+        Turn:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /voice/inbound/turn, Method: POST}
+
+  VoiceOutboundFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-voice-outbound-${Stage}
+      Handler: lambdas.voice_outbound.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Outbound:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /voice/outbound, Method: POST}
+        OutboundGet:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /voice/outbound, Method: GET}
+
+  VoiceKeypressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-voice-keypress-${Stage}
+      Handler: lambdas.voice_keypress.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        Keypress:
+          Type: HttpApi
+          Properties: {ApiId: !Ref WebhookApi, Path: /voice/keypress, Method: POST}
+
+  MatchingEngineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-matching-engine-${Stage}
+      Handler: lambdas.matching_engine.handler.handler
+      MemorySize: 1024
+      Policies: [!Ref CorePolicy]
+
+  SendWhatsappFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-send-whatsapp-${Stage}
+      Handler: lambdas.send_whatsapp.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  CheckOutreachFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-check-outreach-${Stage}
+      Handler: lambdas.check_outreach.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  TriggerVoiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-trigger-voice-${Stage}
+      Handler: lambdas.trigger_voice.handler.handler
+      Policies: [!Ref CorePolicy]
+      Environment:
+        Variables:
+          VOICE_OUTBOUND_URL: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/voice/outbound
+
+  CheckCallFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-check-call-${Stage}
+      Handler: lambdas.check_call.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  GetNextDonorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-get-next-donor-${Stage}
+      Handler: lambdas.get_next_donor.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  BookAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-book-appointment-${Stage}
+      Handler: lambdas.book_appointment.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  NotifyPatientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-notify-patient-${Stage}
+      Handler: lambdas.notify_patient.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  ScheduleRemindersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-schedule-reminders-${Stage}
+      Handler: lambdas.schedule_reminders.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  AppointmentReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-appointment-reminder-${Stage}
+      Handler: lambdas.appointment_reminder.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  ThreeHourReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-three-hour-reminder-${Stage}
+      Handler: lambdas.three_hour_reminder.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  FollowUpRegistrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-follow-up-registration-${Stage}
+      Handler: lambdas.follow_up_registration.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  CooldownNudgeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-cooldown-nudge-${Stage}
+      Handler: lambdas.cooldown_nudge.handler.handler
+      Policies: [!Ref CorePolicy]
+      Events:
+        DailySweep:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Description: Daily sweep to nudge donors past their 90-day cooldown.
+
+  DeleteDonorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-delete-donor-${Stage}
+      Handler: lambdas.delete_donor.handler.handler
+      Policies: [!Ref CorePolicy]
+
+  # ---------------- Step Functions ----------------
+  OutreachStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub raktsetu-outreach-${Stage}
+      DefinitionUri: ../step_functions/outreach_machine.json
+      DefinitionSubstitutions:
+        MatchingEngineArn: !GetAtt MatchingEngineFunction.Arn
+        SendWhatsappArn: !GetAtt SendWhatsappFunction.Arn
+        CheckOutreachArn: !GetAtt CheckOutreachFunction.Arn
+        TriggerVoiceArn: !GetAtt TriggerVoiceFunction.Arn
+        CheckCallArn: !GetAtt CheckCallFunction.Arn
+        GetNextDonorArn: !GetAtt GetNextDonorFunction.Arn
+        BookAppointmentArn: !GetAtt BookAppointmentFunction.Arn
+        NotifyPatientArn: !GetAtt NotifyPatientFunction.Arn
+        ScheduleRemindersArn: !GetAtt ScheduleRemindersFunction.Arn
+      Policies:
+        - LambdaInvokePolicy: {FunctionName: !Ref MatchingEngineFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref SendWhatsappFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref CheckOutreachFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref TriggerVoiceFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref CheckCallFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref GetNextDonorFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref BookAppointmentFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref NotifyPatientFunction}
+        - LambdaInvokePolicy: {FunctionName: !Ref ScheduleRemindersFunction}
+
+  # ---------------- EventBridge Scheduler ----------------
+  SchedulerGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub raktsetu-${Stage}
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-targets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [lambda:InvokeFunction, states:StartExecution]
+                Resource: "*"
+
+  # ---------------- Shared IAM managed policy ----------------
+  CorePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt ConversationsTable.Arn
+              - !GetAtt DonorsTable.Arn
+              - !GetAtt PatientsTable.Arn
+              - !GetAtt RequestsTable.Arn
+              - !GetAtt AppointmentsTable.Arn
+              - !GetAtt WaitlistTable.Arn
+              - !GetAtt ProcessedMessagesTable.Arn
+          - Effect: Allow
+            Action: [secretsmanager:GetSecretValue]
+            Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsManagerSecretId}-*
+          - Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeAgent, bedrock-agent-runtime:InvokeAgent]
+            Resource: "*"
+          - Effect: Allow
+            Action: [states:StartExecution]
+            Resource: "*"
+          - Effect: Allow
+            Action: [scheduler:CreateSchedule, scheduler:DeleteSchedule, iam:PassRole]
+            Resource: "*"
+
+Outputs:
+  WhatsappWebhookUrl:
+    Description: Configure this as the Twilio WhatsApp inbound webhook.
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/whatsapp
+  PeriskopeWebhookUrl:
+    Description: Configure this as the Periskope message.created webhook.
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/periskope
+  VapiToolsUrl:
+    Description: Use this as the Vapi assistant server URL (--server-url + /vapi/tools).
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/vapi/tools
+  VoiceInboundUrl:
+    Description: Configure this as the Twilio Voice number "A call comes in" webhook.
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/voice/inbound
+  OutreachStateMachineArn:
+    Value: !Ref OutreachStateMachine

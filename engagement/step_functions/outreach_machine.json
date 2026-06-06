@@ -1,0 +1,124 @@
+{
+  "Comment": "RaktSetu autonomous donor outreach — rank, ask on WhatsApp, follow-up, escalate to voice call, book, notify, schedule reminders.",
+  "StartAt": "GetRankedDonors",
+  "States": {
+    "GetRankedDonors": {
+      "Type": "Task",
+      "Resource": "${MatchingEngineArn}",
+      "ResultPath": "$.ranking",
+      "Next": "AnyDonors"
+    },
+    "AnyDonors": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ranking.donorsRemaining",
+          "NumericGreaterThan": 0,
+          "Next": "SendOutreachToTopDonor"
+        }
+      ],
+      "Default": "NotifyNoDonorsFound"
+    },
+    "SendOutreachToTopDonor": {
+      "Type": "Task",
+      "Resource": "${SendWhatsappArn}",
+      "ResultPath": "$.outreach",
+      "Next": "WaitForReply"
+    },
+    "WaitForReply": {
+      "Type": "Wait",
+      "Seconds": 14400,
+      "Next": "CheckReplyStatus"
+    },
+    "CheckReplyStatus": {
+      "Type": "Task",
+      "Resource": "${CheckOutreachArn}",
+      "ResultPath": "$.replyStatus",
+      "Next": "RouteOnStatus"
+    },
+    "RouteOnStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.replyStatus.status", "StringEquals": "confirmed", "Next": "BookAppointment"},
+        {"Variable": "$.replyStatus.status", "StringEquals": "declined", "Next": "TryNextDonor"},
+        {"Variable": "$.replyStatus.status", "StringEquals": "no_response", "Next": "EscalateToCall"}
+      ],
+      "Default": "TryNextDonor"
+    },
+    "EscalateToCall": {
+      "Type": "Task",
+      "Resource": "${TriggerVoiceArn}",
+      "ResultPath": "$.call",
+      "Next": "WaitForCallResponse"
+    },
+    "WaitForCallResponse": {
+      "Type": "Wait",
+      "Seconds": 3600,
+      "Next": "CheckCallStatus"
+    },
+    "CheckCallStatus": {
+      "Type": "Task",
+      "Resource": "${CheckCallArn}",
+      "ResultPath": "$.callStatus",
+      "Next": "RouteOnCallStatus"
+    },
+    "RouteOnCallStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.callStatus.status", "StringEquals": "confirmed", "Next": "BookAppointment"}
+      ],
+      "Default": "TryNextDonor"
+    },
+    "TryNextDonor": {
+      "Type": "Task",
+      "Resource": "${GetNextDonorArn}",
+      "ResultPath": "$.next",
+      "Next": "CheckDonorsRemaining"
+    },
+    "CheckDonorsRemaining": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.next.donorsRemaining",
+          "NumericGreaterThan": 0,
+          "Next": "SendOutreachToTopDonor"
+        }
+      ],
+      "Default": "NotifyNoDonorsFound"
+    },
+    "BookAppointment": {
+      "Type": "Task",
+      "Resource": "${BookAppointmentArn}",
+      "ResultPath": "$.appointment",
+      "Next": "NotifyPatient"
+    },
+    "NotifyPatient": {
+      "Type": "Task",
+      "Resource": "${NotifyPatientArn}",
+      "Parameters": {
+        "requestId.$": "$.requestId",
+        "appointmentId.$": "$.appointment.appointmentId",
+        "type": "donor_confirmed"
+      },
+      "ResultPath": "$.notify",
+      "Next": "ScheduleReminders"
+    },
+    "ScheduleReminders": {
+      "Type": "Task",
+      "Resource": "${ScheduleRemindersArn}",
+      "Parameters": {
+        "appointmentId.$": "$.appointment.appointmentId"
+      },
+      "End": true
+    },
+    "NotifyNoDonorsFound": {
+      "Type": "Task",
+      "Resource": "${NotifyPatientArn}",
+      "Parameters": {
+        "requestId.$": "$.requestId",
+        "type": "no_donors"
+      },
+      "End": true
+    }
+  }
+}

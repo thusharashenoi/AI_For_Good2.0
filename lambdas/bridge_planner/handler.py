@@ -46,17 +46,7 @@ def _existing_bridge_state() -> dict[str, dict]:
 
 
 def _persist_plan(plan, status_for_meta: str) -> int:
-    store.put_bridge_meta(plan.bridge_id, plan.patient_id,
-                          status=status_for_meta, bloodGroup=plan.blood_group,
-                          coverage=plan.coverage)
-    vacant = 0
-    for slot in plan.slots:
-        store.put_slot(plan.bridge_id, slot.slot_id, slot.slot_type, "VACANT",
-                       donor_id=slot.donor_id, score=slot.score,
-                       reason=slot.reason, candidate_queue=plan.candidate_queue,
-                       patient_id=plan.patient_id, backup_for=slot.backup_for)
-        vacant += 1
-    return vacant
+    return store.persist_bridge_plan(plan, status_for_meta)
 
 
 def _mobilize(plan, sm_arn: str) -> int:

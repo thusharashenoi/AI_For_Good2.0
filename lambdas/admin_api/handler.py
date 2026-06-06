@@ -30,6 +30,7 @@ from mangum import Mangum
 from pydantic import BaseModel, Field
 
 from raktsetu import config, emergency, store, synth
+from raktsetu.bridge import formation_queue
 
 from .._common import (
     edge_patient_stats,
@@ -362,6 +363,49 @@ def graph_patient(patient_id: str, top_candidates: int = 14):
         "target": config.BRIDGE_SIZE,
         "nodes": list(nodes.values()),
         "edges": edge_rows,
+    }
+
+
+@app.get("/requests")
+def open_requests(limit: int = 20):
+    """Open blood-donation requests raised via WhatsApp/voice (automation flow)."""
+    rows = store.load_open_requests(limit=limit)
+    return {"count": len(rows), "requests": rows}
+
+
+@app.post("/bridges/form/{patient_id}")
+def form_bridge(patient_id: str):
+    """Form a bridge from the Blood Graph for one unbridged patient (admin action)."""
+    donors, patients = load_frames(force=True)
+    load_bridge_state(force=True)
+    load_edges(force=True)
+    pat = get_patient(patients, patient_id)
+    if pat is None:
+        raise HTTPException(status_code=404, detail="patient not found")
+    if pat.get("bridge_id") is not None and str(pat.get("bridge_id")) not in ("nan", "None", ""):
+        raise HTTPException(status_code=400, detail="patient already has a bridge")
+    plan = formation_queue(pat, donors)
+    if not plan.slots:
+        return {
+            "ok": False,
+            "patientId": patient_id,
+            "reason": "no_candidates",
+            "coverage": plan.coverage,
+        }
+    vacant = store.persist_bridge_plan(plan, "FORMING")
+    candidates = [{
+        "donorId": s.donor_id,
+        "score": round(float(s.score), 4),
+        "slotType": s.slot_type,
+        "reason": s.reason,
+    } for s in plan.slots]
+    return {
+        "ok": True,
+        "patientId": patient_id,
+        "bridgeId": plan.bridge_id,
+        "coverage": plan.coverage,
+        "vacantSlots": vacant,
+        "candidates": candidates,
     }
 
 
