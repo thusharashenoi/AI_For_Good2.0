@@ -1,0 +1,9 @@
+.env
+.env.*
+local_state.json
+.pytest_cache/
+tests/
+scripts/
+*.md
+.git/
+.gitignore

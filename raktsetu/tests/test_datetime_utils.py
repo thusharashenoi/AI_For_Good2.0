@@ -1,0 +1,40 @@
+from datetime import datetime, timedelta
+from unittest.mock import patch
+
+from shared.datetime_utils import (
+    default_appointment_slot,
+    format_spoken,
+    now_local,
+    schedule_appointment_reminders,
+)
+from shared import scheduler
+
+
+def test_format_spoken_tomorrow():
+    tomorrow = (now_local() + timedelta(days=1)).strftime("%Y-%m-%d")
+    spoken = format_spoken(tomorrow, "10:00 AM")
+    assert "tomorrow" in spoken.lower()
+    assert "10:00 AM" in spoken
+
+
+def test_default_appointment_slot_from_required_by():
+    from shared.datetime_utils import IST
+    fixed = datetime(2026, 6, 6, 14, 0, tzinfo=IST)
+    with patch("shared.datetime_utils.now_local", return_value=fixed):
+        date_iso, time_str = default_appointment_slot(required_by="tomorrow")
+    assert date_iso == "2026-06-07"
+    assert time_str == "10:00 AM"
+
+
+def test_schedule_reminders_24h_and_3h_before():
+    scheduler.SCHEDULED.clear()
+    appt = {
+        "appointmentId": "appt-test-123",
+        "appointmentDate": (now_local() + timedelta(days=2)).strftime("%Y-%m-%d"),
+        "appointmentTime": "10:00 AM",
+    }
+    schedule_appointment_reminders(appt)
+    assert len(scheduler.SCHEDULED) == 2
+    names = {s["name"] for s in scheduler.SCHEDULED}
+    assert "appt-daybefore-appt-tes" in names
+    assert "appt-threehr-appt-tes" in names
