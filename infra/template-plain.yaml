@@ -147,7 +147,7 @@ Resources:
       Handler: lambdas.admin_api.handler.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 90
-      MemorySize: 1024
+      MemorySize: 2048
       Architectures: [x86_64]
       Code:
         S3Bucket: !Ref LambdaS3Bucket

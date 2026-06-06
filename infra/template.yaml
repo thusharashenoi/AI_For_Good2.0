@@ -104,6 +104,7 @@ Resources:
       FunctionName: !Sub raktsetu-admin-api-${Stage}
       Handler: lambdas.admin_api.handler.handler
       Timeout: 90
+      MemorySize: 2048
       Policies: [!Ref IntelligencePolicy]
       Events:
         Proxy:

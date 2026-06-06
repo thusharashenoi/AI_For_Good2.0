@@ -141,10 +141,11 @@ export default function App() {
   async function refresh() {
     setLoading(true); setError(null);
     try {
-      const [s, b, u, a] = await Promise.all([
-        api.stats(), api.bridges(), api.unbridged(), api.atRisk(12),
-      ]);
-      setStats(s); setBridges(b); setUnbridged(u); setAtRisk(a);
+      const d = await api.dashboard(12);
+      setStats(d.stats);
+      setBridges(d.bridges);
+      setUnbridged(d.unbridged);
+      setAtRisk(d.atRisk);
     } catch (e) {
       setError(String(e));
     } finally {
