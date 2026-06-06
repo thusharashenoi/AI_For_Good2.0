@@ -1,0 +1,94 @@
+# =============================================================================
+# RaktSetu Intelligence layer — additions to merge into the teammate's template.
+#
+# These resources add the Blood Graph "brains" (matching + planning) and a new
+# Bridges table WITHOUT changing any of the existing donor/patient/outreach
+# resources. Copy the blocks below into the corresponding sections of the main
+# template.txt, then `sam build && sam deploy`.
+#
+# NOTE: the existing MatchingEngineFunction / GetNextDonorFunction in the main
+# template should point their Handler at:
+#     lambdas.matching_engine.handler.handler
+#     lambdas.get_next_donor.handler.handler
+# (they already do). Just make sure DYNAMODB_TABLE_BRIDGES is in Globals env.
+# =============================================================================
+
+# ---- Add to Globals.Function.Environment.Variables --------------------------
+#   DYNAMODB_TABLE_BRIDGES: !Ref BridgesTable
+#   PLANNER_MOBILIZE: "1"     # set "0" to plan without auto-starting outreach
+#   CACHE_TTL: "120"
+
+# ---- Add under Resources -----------------------------------------------------
+Resources:
+  BridgesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub raktsetu-bridges-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: bridgeId, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+        - {AttributeName: patientId, AttributeType: S}
+      KeySchema:
+        - {AttributeName: bridgeId, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      GlobalSecondaryIndexes:
+        - IndexName: patient-index
+          KeySchema:
+            - {AttributeName: patientId, KeyType: HASH}
+          Projection: {ProjectionType: ALL}
+
+  # Proactive planner: forms bridges for unbridged patients and backfills
+  # under-buffered bridges. Runs every 6 hours.
+  BridgePlannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-bridge-planner-${Stage}
+      Handler: lambdas.bridge_planner.handler.handler
+      MemorySize: 1024
+      Timeout: 120
+      Policies: [!Ref CorePolicy]
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Description: Form/maintain Blood Bridges from the Blood Graph.
+
+  # Read-only admin/ops dashboard API (FastAPI + Mangum).
+  AdminApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, OPTIONS]
+        AllowHeaders: ["*"]
+
+  AdminApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-admin-api-${Stage}
+      Handler: lambdas.admin_api.handler.handler
+      MemorySize: 1024
+      Timeout: 30
+      Policies: [!Ref CorePolicy]
+      Events:
+        Proxy:
+          Type: HttpApi
+          Properties: {ApiId: !Ref AdminApi, Path: /{proxy+}, Method: GET}
+        Root:
+          Type: HttpApi
+          Properties: {ApiId: !Ref AdminApi, Path: /, Method: GET}
+
+# ---- Add the BridgesTable ARN to CorePolicy's DynamoDB Resource list ---------
+#   - !GetAtt BridgesTable.Arn
+#   - !Sub "${BridgesTable.Arn}/index/*"
+
+# ---- Add to Outputs ----------------------------------------------------------
+Outputs:
+  BridgesTableName:
+    Value: !Ref BridgesTable
+  AdminApiUrl:
+    Description: Base URL for the ops dashboard frontend.
+    Value: !Sub https://${AdminApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}

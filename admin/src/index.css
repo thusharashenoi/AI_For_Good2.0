@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(900px 480px at 90% -120px, #fff0f3 0%, rgba(255, 245, 247, 0) 60%),
+    #fafaf9;
+  color: #3b3b3b;
+  font-family: Manrope, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+.font-head {
+  font-family: Poppins, Manrope, ui-sans-serif, system-ui, sans-serif;
+}
+
+.card {
+  @apply bg-surface border border-line rounded-2xl shadow-card;
+}

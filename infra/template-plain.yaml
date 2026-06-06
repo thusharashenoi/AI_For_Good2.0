@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Blood Warriors Bridge Intelligence (plain CloudFormation — no SAM transform).
+  Uses existing raktsetu-*-${Stage} DynamoDB tables.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+  PlannerMobilize:
+    Type: String
+    Default: "0"
+  LambdaS3Bucket:
+    Type: String
+  LambdaS3Key:
+    Type: String
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub raktsetu-intelligence-lambda-${Stage}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: IntelligenceDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-donors-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-patients-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}/index/*
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: "*"
+
+  MatchingEngineFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub raktsetu-matching-engine-${Stage}
+      Runtime: python3.10
+      Handler: lambdas.matching_engine.handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 1024
+      Architectures: [x86_64]
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          AWS_REGION_NAME: !Ref AWS::Region
+          DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
+          DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
+          DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+          CACHE_TTL: "120"
+          PLANNER_MOBILIZE: !Ref PlannerMobilize
+
+  GetNextDonorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub raktsetu-get-next-donor-${Stage}
+      Runtime: python3.10
+      Handler: lambdas.get_next_donor.handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 1024
+      Architectures: [x86_64]
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          AWS_REGION_NAME: !Ref AWS::Region
+          DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
+          DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
+          DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+          CACHE_TTL: "120"
+          PLANNER_MOBILIZE: !Ref PlannerMobilize
+
+  BridgePlannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub raktsetu-bridge-planner-${Stage}
+      Runtime: python3.10
+      Handler: lambdas.bridge_planner.handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 120
+      MemorySize: 1024
+      Architectures: [x86_64]
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          AWS_REGION_NAME: !Ref AWS::Region
+          DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
+          DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
+          DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+          CACHE_TTL: "120"
+          PLANNER_MOBILIZE: !Ref PlannerMobilize
+
+  BridgePlannerSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub raktsetu-bridge-planner-${Stage}
+      Description: Form/maintain Blood Bridges from the Blood Graph.
+      ScheduleExpression: rate(6 hours)
+      State: ENABLED
+      Targets:
+        - Id: BridgePlanner
+          Arn: !GetAtt BridgePlannerFunction.Arn
+
+  BridgePlannerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BridgePlannerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BridgePlannerSchedule.Arn
+
+  AdminApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub raktsetu-admin-api-${Stage}
+      Runtime: python3.10
+      Handler: lambdas.admin_api.handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Architectures: [x86_64]
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          AWS_REGION_NAME: !Ref AWS::Region
+          DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
+          DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
+          DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+          CACHE_TTL: "120"
+          PLANNER_MOBILIZE: !Ref PlannerMobilize
+
+  AdminHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub raktsetu-admin-api-${Stage}
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: ["*"]
+
+  AdminApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref AdminHttpApi
+      StageName: !Ref Stage
+      AutoDeploy: true
+
+  AdminApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref AdminHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdminApiFunction.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  AdminApiRouteProxy:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminHttpApi
+      RouteKey: ANY /{proxy+}
+      Target: !Sub integrations/${AdminApiIntegration}
+
+  AdminApiRouteRoot:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminHttpApi
+      RouteKey: ANY /
+      Target: !Sub integrations/${AdminApiIntegration}
+
+  AdminApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AdminApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AdminHttpApi}/*/*
+
+  AdminUiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub raktsetu-admin-ui-${Stage}-${AWS::AccountId}
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  AdminUiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminUiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub ${AdminUiBucket.Arn}/*
+
+Outputs:
+  AdminApiUrl:
+    Value: !Sub https://${AdminHttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  AdminUiBucketName:
+    Value: !Ref AdminUiBucket
+  AdminUiUrl:
+    Value: !GetAtt AdminUiBucket.WebsiteURL
+  MatchingEngineArn:
+    Value: !GetAtt MatchingEngineFunction.Arn
+  GetNextDonorArn:
+    Value: !GetAtt GetNextDonorFunction.Arn
+  BridgePlannerArn:
+    Value: !GetAtt BridgePlannerFunction.Arn

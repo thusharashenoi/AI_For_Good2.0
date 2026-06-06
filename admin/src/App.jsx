@@ -1,0 +1,349 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { api, shortId } from "./api.js";
+import BloodGraphTab from "./BloodGraphTab.jsx";
+import EmergencyTab from "./EmergencyTab.jsx";
+
+// Blood-group colours tuned for a light background.
+const GROUP_COLORS = {
+  "O-": "#e11d48", "O+": "#fb7185", "A-": "#2563eb", "A+": "#60a5fa",
+  "B-": "#d97706", "B+": "#f59e0b", "AB-": "#7c3aed", "AB+": "#a78bfa",
+};
+
+function Stat({ label, value, accent }) {
+  return (
+    <div className="card p-5">
+      <div className="text-muted text-xs font-semibold uppercase tracking-wider">{label}</div>
+      <div className="text-3xl font-head font-bold mt-1" style={{ color: accent || "#141414" }}>
+        {value ?? "—"}
+      </div>
+    </div>
+  );
+}
+
+function GroupTag({ g }) {
+  const c = GROUP_COLORS[g] || "#8a8a8a";
+  return (
+    <span className="px-2 py-0.5 rounded-md text-xs font-bold"
+      style={{ background: c + "1a", color: c }}>
+      {g || "?"}
+    </span>
+  );
+}
+
+function fillTierColor(active) {
+  if (active < 6) return "#ef4444";
+  if (active <= 8) return "#eab308";
+  return "#10b981";
+}
+
+function FillBar({ active, buffer, vacant, target }) {
+  const pct = (n) => `${(100 * n) / target}%`;
+  const activeColor = fillTierColor(active);
+  return (
+    <div className="flex h-2.5 w-40 rounded-full overflow-hidden bg-line">
+      <div style={{ width: pct(active), background: activeColor }} title={`${active} active`} />
+      <div style={{ width: pct(buffer), background: "#f59e0b" }} title={`${buffer} buffer`} />
+      <div style={{ width: pct(vacant), background: "#e9e9e9" }} title={`${vacant} vacant`} />
+    </div>
+  );
+}
+
+function CandidatesDrawer({ patient, onClose }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!patient) return;
+    setData(null); setErr(null);
+    api.candidates(patient.patientId, 12).then(setData).catch((e) => setErr(String(e)));
+  }, [patient]);
+  if (!patient) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-ink/30 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-md h-full bg-surface border-l border-line p-6 overflow-y-auto shadow-2xl"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-head font-semibold text-ink">Proposed bridge</h3>
+          <button onClick={onClose} className="text-muted hover:text-ink text-lg">✕</button>
+        </div>
+        <div className="mt-1 text-sm text-muted">
+          {patient.name || shortId(patient.patientId)} · <GroupTag g={patient.bloodGroup} />
+        </div>
+        {err && <div className="mt-4 text-danger text-sm">{err}</div>}
+        {!data && !err && <div className="mt-6 text-muted">Ranking donors…</div>}
+        {data && (
+          <ol className="mt-4 space-y-2">
+            {data.candidates.map((c, i) => (
+              <li key={c.donorId}
+                className="rounded-xl px-3 py-2 bg-canvas border border-line">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-muted w-5 text-right text-sm">{i + 1}</span>
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${c.slotTypeHint === "active" ? "bg-success/10 text-success-dark" : "bg-warn/10 text-warn"}`}>
+                      {c.slotTypeHint}
+                    </span>
+                    <span className="text-sm text-ink font-medium">{c.name || shortId(c.donorId)}</span>
+                    <GroupTag g={c.group} />
+                  </div>
+                  <span className="font-bold text-ink">{c.score.toFixed(2)}</span>
+                </div>
+                <div className="flex items-center gap-4 mt-1 pl-7 text-xs text-muted">
+                  <span>📍 {c.city ? `${c.city} · ` : ""}{c.distanceKm != null ? `${c.distanceKm} km` : "—"}</span>
+                  <span>🤝 show-up {Math.round((c.showRate ?? 0) * 100)}%</span>
+                  <span>💪 willing {Math.round((c.willingness ?? 0) * 100)}%</span>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+        <p className="mt-4 text-xs text-muted leading-relaxed">
+          Ranked after gating on compatibility, 90-day eligibility, and patient-specific
+          availability. Score = proximity + show-up + willingness (ecosystem retention).
+          Top 6 → active rotation; backups follow the no-show policy.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, sub, children, right }) {
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="font-head font-semibold text-ink">{title}</h2>
+          {sub && <p className="text-xs text-muted mt-0.5">{sub}</p>}
+        </div>
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const thCls = "text-muted text-[11px] font-semibold uppercase tracking-wide";
+
+export default function App() {
+  const [stats, setStats] = useState(null);
+  const [bridges, setBridges] = useState(null);
+  const [unbridged, setUnbridged] = useState(null);
+  const [atRisk, setAtRisk] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [tab, setTab] = useState("ops");
+  const [graphBridgeId, setGraphBridgeId] = useState(null);
+
+  function openBridgeGraph(bridgeId) {
+    setGraphBridgeId(bridgeId);
+    setTab("graph");
+  }
+
+  async function refresh() {
+    setLoading(true); setError(null);
+    try {
+      const [s, b, u, a] = await Promise.all([
+        api.stats(), api.bridges(), api.unbridged(), api.atRisk(12),
+      ]);
+      setStats(s); setBridges(b); setUnbridged(u); setAtRisk(a);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { refresh(); }, []);
+
+  const weakBridges = useMemo(
+    () => (bridges?.bridges || [])
+      .filter((b) => (b.fill ?? 0) < (b.target ?? 10))
+      .sort((a, b) => (a.fill ?? 0) - (b.fill ?? 0) || (b.vacant ?? 0) - (a.vacant ?? 0))
+      .slice(0, 12),
+    [bridges]
+  );
+
+  return (
+    <div className="min-h-full text-body">
+      <header className="border-b border-line bg-surface/70 backdrop-blur sticky top-0 z-40">
+        <div className="px-8 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-xl bg-brand grid place-items-center text-white shadow-card">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden>
+                <path d="M12 2s7 7.6 7 12.2A7 7 0 1 1 5 14.2C5 9.6 12 2 12 2z" />
+              </svg>
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-lg font-head font-bold text-ink leading-tight">
+                  Blood Warriors <span className="text-brand">·</span> Bridge Intelligence
+                </h1>
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md bg-brand-soft text-brand border border-brand/20">
+                  Extension
+                </span>
+              </div>
+              <p className="text-xs text-muted">
+                Coordinator tools for{" "}
+                <a href="https://www.bloodwarriors.in/home" target="_blank" rel="noreferrer"
+                  className="text-brand hover:underline font-medium">
+                  bloodwarriors.in
+                </a>
+                {" "}· Blood Graph &amp; bridge planning
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex rounded-xl border border-line bg-canvas p-1">
+              {[
+                ["ops", "Operations"],
+                ["graph", "Blood Graph"],
+                ["emergency", "Emergency"],
+              ].map(([id, label]) => (
+                <button key={id} onClick={() => setTab(id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    tab === id ? "bg-brand text-white shadow-sm" : "text-muted hover:text-ink"
+                  }`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button onClick={refresh}
+            className="px-4 py-2 rounded-xl bg-brand hover:bg-brand-dark text-white text-sm font-semibold shadow-card transition-colors">
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="px-8 py-6 pb-16 space-y-6 max-w-[1400px] mx-auto">
+        {error && tab === "ops" && (
+          <div className="card p-4 border-brand/30 bg-brand-soft text-danger text-sm">
+            {error} — is the API running on :8000? Start it with{" "}
+            <code className="font-mono">scripts.run_admin_api</code>.
+          </div>
+        )}
+
+        {tab === "graph" ? (
+          <BloodGraphTab
+            selectedBridgeId={graphBridgeId}
+            onSelectBridge={setGraphBridgeId}
+            onClearBridge={() => setGraphBridgeId(null)}
+          />
+        ) : tab === "emergency" ? (
+          <EmergencyTab />
+        ) : (
+        <>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <Stat label="Donors" value={stats?.donors} />
+          <Stat label="Eligible now" value={stats?.eligibleDonors} accent="#059669" />
+          <Stat label="Patients" value={stats?.patients} />
+          <Stat label="Unbridged" value={stats?.unbridgedPatients} accent="#f59e0b" />
+          <Stat label="Bridges" value={stats?.bridges} />
+          <Stat label="Vacant slots" value={stats?.vacantSlots} accent="#f14164" />
+        </div>
+
+        <div className="grid lg:grid-cols-2 gap-6">
+          <Section title="Unbridged patients"
+            sub="No bridge yet — the planner can form a 6+4 bridge from the graph.">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={thCls}><th className="text-left py-2 font-semibold">Patient</th><th>Group</th>
+                  <th className="text-right">Donor pool</th><th className="text-right">Top score</th><th></th></tr>
+              </thead>
+              <tbody>
+                {(unbridged?.patients || []).map((p) => (
+                  <tr key={p.patientId} className="border-t border-line">
+                    <td className="py-2.5 text-ink font-medium">{p.name || shortId(p.patientId)}
+                      {p.city && <span className="text-muted font-normal text-xs"> · {p.city}</span>}</td>
+                    <td className="text-center"><GroupTag g={p.bloodGroup} /></td>
+                    <td className="text-right">{p.candidatePool}</td>
+                    <td className="text-right">{p.topScore?.toFixed(2) ?? "—"}</td>
+                    <td className="text-right">
+                      <button onClick={() => setSelected(p)}
+                        className="px-3 py-1 rounded-lg bg-brand hover:bg-brand-dark text-white text-xs font-semibold transition-colors">
+                        Form bridge
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {unbridged && unbridged.patients.length === 0 && (
+                  <tr><td colSpan="5" className="py-4 text-center text-muted">All patients bridged 🎉</td></tr>
+                )}
+              </tbody>
+            </table>
+          </Section>
+
+          <Section title="At-risk patients"
+            sub="Thinnest eligible + compatible donor pools — watch these first.">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={thCls}><th className="text-left py-2 font-semibold">Patient</th><th>Group</th>
+                  <th className="text-right">Eligible donors</th><th className="text-center">Bridged</th></tr>
+              </thead>
+              <tbody>
+                {(atRisk?.patients || []).map((p) => (
+                  <tr key={p.patientId} className="border-t border-line">
+                    <td className="py-2.5 text-ink font-medium">{p.name || shortId(p.patientId)}</td>
+                    <td className="text-center"><GroupTag g={p.bloodGroup} /></td>
+                    <td className="text-right">
+                      <span className={p.eligibleCompatibleDonors < 50 ? "text-danger font-bold" : ""}>
+                        {p.eligibleCompatibleDonors}
+                      </span>
+                    </td>
+                    <td className="text-center">{p.bridged ? <span className="text-success-dark">✓</span> : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Section>
+        </div>
+
+        <Section title="Bridge health"
+          sub="Active bar: red (&lt;6) · yellow (6–8) · green (9–10). Buffer (amber) · vacant (grey). Target = 10 donors.">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thCls}><th className="text-left py-2 font-semibold">Bridge</th><th>Group</th><th>Status</th>
+                <th className="text-right">Active</th><th className="text-right">Buffer</th>
+                <th className="text-right">Vacant</th><th className="text-left pl-6">Fill</th><th></th></tr>
+            </thead>
+            <tbody>
+              {weakBridges.map((b) => (
+                <tr key={b.bridgeId} className="border-t border-line">
+                  <td className="py-2.5 text-ink font-medium">{b.patientName || b.bridgeId}
+                    <span className="block text-muted font-mono font-normal text-[11px]">{b.bridgeId}</span></td>
+                  <td className="text-center"><GroupTag g={b.bloodGroup} /></td>
+                  <td className="text-center text-xs text-muted">{b.status}</td>
+                  <td className="text-right text-success-dark font-semibold">{b.active}</td>
+                  <td className="text-right text-warn font-semibold">{b.buffer}</td>
+                  <td className="text-right text-muted">{b.vacant}</td>
+                  <td className="pl-6"><FillBar active={b.active} buffer={b.buffer} vacant={b.vacant} target={b.target} /></td>
+                  <td className="text-right">
+                    {b.active < 10 && (
+                      <button onClick={() => openBridgeGraph(b.bridgeId)}
+                        className="px-3 py-1 rounded-lg border border-brand/40 bg-brand-soft hover:bg-brand/10 text-brand text-xs font-semibold transition-colors whitespace-nowrap">
+                        View graph
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {weakBridges.length === 0 && (
+                <tr><td colSpan="8" className="py-4 text-center text-muted">Every bridge is at full strength.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </Section>
+
+        <footer className="text-center text-xs text-muted pt-2">
+          Blood Warriors Bridge Intelligence · coordinator extension ·{" "}
+          <a href="https://www.bloodwarriors.in/leaderboard" target="_blank" rel="noreferrer"
+            className="text-brand hover:underline">
+            bloodwarriors.in
+          </a>
+        </footer>
+        </>
+        )}
+      </main>
+
+      <CandidatesDrawer patient={selected} onClose={() => setSelected(null)} />
+    </div>
+  );
+}

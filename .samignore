@@ -1,0 +1,15 @@
+.venv/
+admin/node_modules/
+admin/dist/
+.git/
+.cursor/
+data/
+resources/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+*.png
+*.parquet
+*.csv
+agent-transcripts/
+terminals/

@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-09
+Description: >
+  Blood Warriors Bridge Intelligence — matching, bridge planner, admin API.
+  Uses existing raktsetu-*-${Stage} DynamoDB tables (create via scripts/create_tables.py).
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  PlannerMobilize:
+    Type: String
+    Default: "0"
+    Description: Set to 1 to auto-start outreach from bridge planner (needs OUTREACH_STATE_MACHINE_ARN).
+
+Globals:
+  Function:
+    Runtime: python3.10
+    Timeout: 60
+    MemorySize: 1024
+    Architectures: [x86_64]
+    CodeUri: ../lambda_bundle
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        AWS_REGION_NAME: !Ref AWS::Region
+        DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
+        DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
+        DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+        CACHE_TTL: "120"
+        PLANNER_MOBILIZE: !Ref PlannerMobilize
+
+Resources:
+  IntelligencePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-donors-${Stage}
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-patients-${Stage}
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}/index/*
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+          - Effect: Allow
+            Action: [states:StartExecution]
+            Resource: "*"
+
+  MatchingEngineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-matching-engine-${Stage}
+      Handler: lambdas.matching_engine.handler.handler
+      Policies: [!Ref IntelligencePolicy]
+
+  GetNextDonorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-get-next-donor-${Stage}
+      Handler: lambdas.get_next_donor.handler.handler
+      Policies: [!Ref IntelligencePolicy]
+
+  BridgePlannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-bridge-planner-${Stage}
+      Handler: lambdas.bridge_planner.handler.handler
+      Timeout: 120
+      Policies: [!Ref IntelligencePolicy]
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Description: Form/maintain Blood Bridges from the Blood Graph.
+
+  AdminApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: ["*"]
+
+  AdminApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub raktsetu-admin-api-${Stage}
+      Handler: lambdas.admin_api.handler.handler
+      Timeout: 90
+      Policies: [!Ref IntelligencePolicy]
+      Events:
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /{proxy+}
+            Method: ANY
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdminApi
+            Path: /
+            Method: ANY
+
+  AdminUiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub raktsetu-admin-ui-${Stage}-${AWS::AccountId}
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  AdminUiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminUiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub ${AdminUiBucket.Arn}/*
+
+Outputs:
+  AdminApiUrl:
+    Description: Blood Warriors Bridge Intelligence API (set VITE_API_BASE to this URL).
+    Value: !Sub https://${AdminApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  AdminUiBucketName:
+    Description: S3 bucket for the static admin dashboard (sync admin/dist here).
+    Value: !Ref AdminUiBucket
+  AdminUiUrl:
+    Description: Public HTTP URL for the admin dashboard (S3 static website).
+    Value: !GetAtt AdminUiBucket.WebsiteURL
+  MatchingEngineArn:
+    Value: !GetAtt MatchingEngineFunction.Arn
+  GetNextDonorArn:
+    Value: !GetAtt GetNextDonorFunction.Arn
+  BridgePlannerArn:
+    Value: !GetAtt BridgePlannerFunction.Arn
