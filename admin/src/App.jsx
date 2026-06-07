@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { api, shortId } from "./api.js";
-import BloodGraphTab from "./BloodGraphTab.jsx";
-import CalendarTab from "./CalendarTab.jsx";
-import EmergencyTab from "./EmergencyTab.jsx";
 import ErrorModal, { formatApiError } from "./ErrorModal.jsx";
 import bwLongLogo from "./assets/bw-long-logo.png";
+
+const BloodGraphTab = React.lazy(() => import("./BloodGraphTab.jsx"));
+const CalendarTab = React.lazy(() => import("./CalendarTab.jsx"));
+const EmergencyTab = React.lazy(() => import("./EmergencyTab.jsx"));
 
 // Blood-group colours tuned for a light background.
 const GROUP_COLORS = {
@@ -12,13 +13,17 @@ const GROUP_COLORS = {
   "B-": "#d97706", "B+": "#f59e0b", "AB-": "#7c3aed", "AB+": "#a78bfa",
 };
 
-function Stat({ label, value, accent }) {
+function Stat({ label, value, accent, loading }) {
   return (
     <div className="card p-5">
       <div className="text-muted text-xs font-semibold uppercase tracking-wider">{label}</div>
-      <div className="text-3xl font-head font-bold mt-1" style={{ color: accent || "#141414" }}>
-        {value ?? "—"}
-      </div>
+      {loading ? (
+        <div className="mt-2 h-9 w-20 rounded-lg bg-line animate-pulse" aria-hidden />
+      ) : (
+        <div className="text-3xl font-head font-bold mt-1" style={{ color: accent || "#141414" }}>
+          {value ?? "—"}
+        </div>
+      )}
     </div>
   );
 }
@@ -233,6 +238,7 @@ export default function App() {
   const [appointments, setAppointments] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState(null);
   const [formingPatientId, setFormingPatientId] = useState(null);
   const [tab, setTab] = useState("ops");
@@ -245,20 +251,23 @@ export default function App() {
     setTab("graph");
   }
 
-  async function refresh() {
-    setLoading(true); setError(null);
+  async function refresh(initial = false) {
+    if (initial) setLoading(true);
+    else setRefreshing(true);
+    setError(null);
     try {
-      const [d, req] = await Promise.all([api.dashboard(12), api.requests(10)]);
+      const d = await api.dashboard(12);
       setStats(d.stats);
       setBridges(d.bridges);
       setUnbridged(d.unbridged);
       setAtRisk(d.atRisk);
-      setRequests(req);
+      setRequests(d.requests);
       setAppointments(d.appointments);
     } catch (e) {
       setError(formatApiError(e));
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -317,7 +326,7 @@ export default function App() {
       setFormingPatientId(null);
     }
   }
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(true); }, []);
 
   const weakBridges = useMemo(
     () => (bridges?.bridges || [])
@@ -354,9 +363,9 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <button onClick={refresh}
+            <button onClick={() => refresh(false)}
             className="px-4 py-2 rounded-xl bg-brand hover:bg-brand-dark text-white text-sm font-semibold shadow-card transition-colors">
-            {loading ? "Refreshing…" : "Refresh"}
+            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
           </div>
         </div>
@@ -366,24 +375,30 @@ export default function App() {
         <ErrorModal message={error} onDismiss={() => setError(null)} />
 
         {tab === "graph" ? (
-          <BloodGraphTab
-            selectedBridgeId={graphBridgeId}
-            onSelectBridge={setGraphBridgeId}
-            onClearBridge={() => setGraphBridgeId(null)}
-          />
+          <Suspense fallback={<div className="card p-8 text-center text-muted">Loading blood graph…</div>}>
+            <BloodGraphTab
+              selectedBridgeId={graphBridgeId}
+              onSelectBridge={setGraphBridgeId}
+              onClearBridge={() => setGraphBridgeId(null)}
+            />
+          </Suspense>
         ) : tab === "calendar" ? (
-          <CalendarTab />
+          <Suspense fallback={<div className="card p-8 text-center text-muted">Loading calendar…</div>}>
+            <CalendarTab />
+          </Suspense>
         ) : tab === "emergency" ? (
-          <EmergencyTab />
+          <Suspense fallback={<div className="card p-8 text-center text-muted">Loading emergency matcher…</div>}>
+            <EmergencyTab />
+          </Suspense>
         ) : (
         <>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          <Stat label="Donors" value={stats?.donors} />
-          <Stat label="Eligible now" value={stats?.eligibleDonors} accent="#059669" />
-          <Stat label="Patients" value={stats?.patients} />
-          <Stat label="Unbridged" value={stats?.unbridgedPatients} accent="#f59e0b" />
-          <Stat label="Bridges" value={stats?.bridges} />
-          <Stat label="Vacant slots" value={stats?.vacantSlots} accent="#f14164" />
+          <Stat label="Donors" value={stats?.donors} loading={loading} />
+          <Stat label="Eligible now" value={stats?.eligibleDonors} accent="#059669" loading={loading} />
+          <Stat label="Patients" value={stats?.patients} loading={loading} />
+          <Stat label="Unbridged" value={stats?.unbridgedPatients} accent="#f59e0b" loading={loading} />
+          <Stat label="Bridges" value={stats?.bridges} loading={loading} />
+          <Stat label="Vacant slots" value={stats?.vacantSlots} accent="#f14164" loading={loading} />
         </div>
 
         <div className="grid lg:grid-cols-2 gap-6">

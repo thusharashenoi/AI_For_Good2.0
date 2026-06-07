@@ -43,17 +43,23 @@ def _bootstrap_env() -> None:
             key, _, val = line.partition("=")
             key, val = key.strip(), val.strip().strip('"').strip("'")
             os.environ.setdefault(key, val)
+    from raktsetu import config as rs_config  # noqa: WPS433
+
     delay = _escalation_delay_sec()
     for key, val in {
-        "STAGE": "dev",
+        "STAGE": rs_config.STAGE,
         "LOCAL_MODE": "0",
         "PERISKOPE_LIVE_SENDS": "1",
         "VAPI_LIVE_CALLS": "1",
+        "SECRETS_MANAGER_SECRET_ID": os.environ.get("SECRETS_MANAGER_SECRET_ID", "raktsetu/config"),
         "DEMO_OUTREACH_PHONE": "+919372875356",
         "DEMO_OUTREACH_CALL_DELAY_SEC": str(int(delay)),
         "OUTREACH_VOICE_ESCALATION_SECONDS": str(int(delay)),
-        "DYNAMODB_TABLE_CONVERSATIONS": "raktsetu-conversations-dev",
-        "DYNAMODB_TABLE_DONORS": "raktsetu-donors-dev",
+        "DYNAMODB_TABLE_CONVERSATIONS": f"raktsetu-conversations-{rs_config.STAGE}",
+        "DYNAMODB_TABLE_DONORS": rs_config.TABLE_DONORS,
+        "DYNAMODB_TABLE_PATIENTS": rs_config.TABLE_PATIENTS,
+        "DYNAMODB_TABLE_REQUESTS": rs_config.TABLE_REQUESTS,
+        "DYNAMODB_TABLE_APPOINTMENTS": rs_config.TABLE_APPOINTMENTS,
         "LOCAL_SERVER_URL": os.environ.get("LOCAL_SERVER_URL", "http://127.0.0.1:4000"),
     }.items():
         os.environ.setdefault(key, val)

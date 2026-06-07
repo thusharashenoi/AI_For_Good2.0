@@ -545,11 +545,11 @@ def form_bridge(patient_id: str):
 @app.post("/bridges/{bridge_id}/broadcast")
 def broadcast_bridge(bridge_id: str):
     """One WhatsApp to demo phone; Vapi call after threshold if no reply."""
-    state = load_bridge_state(force=True)
+    state = load_bridge_state()
     bridge = state.get(bridge_id)
     if not bridge:
         raise HTTPException(status_code=404, detail="bridge not found")
-    donors, patients = load_frames(force=True)
+    donors, patients = load_frames()
     pname = patients.set_index("user_id")["name"].to_dict() if "name" in patients.columns else {}
     patient_name = pname.get(bridge.get("patientId"))
     pat = get_patient(patients, bridge.get("patientId"))
@@ -571,7 +571,10 @@ def broadcast_bridge(bridge_id: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("reason") or "broadcast failed")
+        detail = result.get("reason") or "broadcast failed"
+        if result.get("error"):
+            detail = f"{detail}: {result['error']}"
+        raise HTTPException(status_code=400, detail=detail)
     return result
 
 
@@ -653,11 +656,16 @@ def dashboard(at_risk_limit: int = 12):
             appts = store.list_appointments(limit=20)
         except Exception:
             appts = []
+        try:
+            req_rows = store.load_open_requests(limit=10)
+        except Exception:
+            req_rows = []
         return {
             "stats": _stats_payload(donors, patients, bridge_state),
             "bridges": _bridges_payload(bridge_state, patients),
             "unbridged": _unbridged_payload(patients, edges, bridge_state),
             "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
+            "requests": {"count": len(req_rows), "requests": req_rows},
             "appointments": {"appointments": [
                 {
                     "appointmentId": a.get("appointmentId"),
