@@ -609,32 +609,88 @@ def bridge_outreach_status(bridge_id: str):
         "escalationCallResult": result,
         "voiceCallId": conv.get("activeVoiceCallId"),
         "whatsappSentAt": conv.get("outreachWhatsappSentAt"),
+        "appointmentBooked": bool(conv.get("activeAppointmentId")),
+        "activeAppointmentId": conv.get("activeAppointmentId"),
     }
+
+
+def _appointments_payload(limit: int = 20) -> dict:
+    try:
+        appts = store.list_appointments(limit=limit)
+    except Exception:
+        appts = []
+    return {
+        "appointments": [
+            {
+                "appointmentId": a.get("appointmentId"),
+                "bridgeId": a.get("bridgeId"),
+                "donorName": a.get("donorName"),
+                "donorPhone": a.get("donorPhone"),
+                "patientName": a.get("patientName"),
+                "bloodGroup": a.get("bloodGroup"),
+                "hospital": a.get("hospital"),
+                "city": a.get("city"),
+                "appointmentDate": a.get("appointmentDate"),
+                "appointmentTime": a.get("appointmentTime"),
+                "status": a.get("status"),
+                "channel": a.get("channel"),
+                "createdAt": a.get("createdAt"),
+            }
+            for a in appts
+        ],
+    }
+
+
+def _requests_payload(limit: int = 10) -> dict:
+    try:
+        req_rows = store.load_open_requests(limit=limit)
+    except Exception:
+        req_rows = []
+    return {"count": len(req_rows), "requests": req_rows}
+
+
+@app.get("/dashboard/summary")
+def dashboard_summary():
+    """Fast dashboard slice — stats, bridges, appointments, requests (no blood-graph edges)."""
+    try:
+        donors, patients = load_frames()
+        bridge_state = load_bridge_state()
+        appts = _appointments_payload(20)
+        return {
+            "stats": _stats_payload(donors, patients, bridge_state),
+            "bridges": _bridges_payload(bridge_state, patients),
+            "requests": _requests_payload(10),
+            "appointments": appts,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/dashboard/pools")
+def dashboard_pools(at_risk_limit: int = 12):
+    """Heavier slice — unbridged + at-risk (requires full edge computation)."""
+    try:
+        donors, patients = load_frames()
+        edges = load_edges()
+        bridge_state = load_bridge_state()
+        return {
+            "unbridged": _unbridged_payload(patients, edges, bridge_state),
+            "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/appointments")
 def list_appointments(limit: int = 20):
     """Recent donation appointments booked via WhatsApp / voice outreach."""
-    rows = store.list_appointments(limit=limit)
-    out = []
-    for a in rows:
-        out.append({
-            "appointmentId": a.get("appointmentId"),
-            "bridgeId": a.get("bridgeId"),
-            "requestId": a.get("requestId"),
-            "donorName": a.get("donorName"),
-            "donorPhone": a.get("donorPhone"),
-            "patientName": a.get("patientName"),
-            "bloodGroup": a.get("bloodGroup"),
-            "hospital": a.get("hospital"),
-            "city": a.get("city"),
-            "appointmentDate": a.get("appointmentDate"),
-            "appointmentTime": a.get("appointmentTime"),
-            "status": a.get("status"),
-            "channel": a.get("channel"),
-            "createdAt": a.get("createdAt"),
-        })
-    return {"count": len(out), "appointments": out}
+    payload = _appointments_payload(limit)
+    rows = payload["appointments"]
+    return {"count": len(rows), "appointments": rows}
 
 
 @app.delete("/appointments/{appointment_id}")
@@ -652,38 +708,15 @@ def dashboard(at_risk_limit: int = 12):
         donors, patients = load_frames()
         edges = load_edges()
         bridge_state = load_bridge_state()
-        try:
-            appts = store.list_appointments(limit=20)
-        except Exception:
-            appts = []
-        try:
-            req_rows = store.load_open_requests(limit=10)
-        except Exception:
-            req_rows = []
+        appts = _appointments_payload(20)
+        req_payload = _requests_payload(10)
         return {
             "stats": _stats_payload(donors, patients, bridge_state),
             "bridges": _bridges_payload(bridge_state, patients),
             "unbridged": _unbridged_payload(patients, edges, bridge_state),
             "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
-            "requests": {"count": len(req_rows), "requests": req_rows},
-            "appointments": {"appointments": [
-                {
-                    "appointmentId": a.get("appointmentId"),
-                    "bridgeId": a.get("bridgeId"),
-                    "donorName": a.get("donorName"),
-                    "donorPhone": a.get("donorPhone"),
-                    "patientName": a.get("patientName"),
-                    "bloodGroup": a.get("bloodGroup"),
-                    "hospital": a.get("hospital"),
-                    "city": a.get("city"),
-                    "appointmentDate": a.get("appointmentDate"),
-                    "appointmentTime": a.get("appointmentTime"),
-                    "status": a.get("status"),
-                    "channel": a.get("channel"),
-                    "createdAt": a.get("createdAt"),
-                }
-                for a in appts
-            ]},
+            "requests": req_payload,
+            "appointments": appts,
         }
     except HTTPException:
         raise

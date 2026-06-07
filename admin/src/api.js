@@ -50,6 +50,8 @@ async function del(path) {
 }
 
 export const api = {
+  dashboardSummary: () => get("/dashboard/summary"),
+  dashboardPools: (atRiskLimit = 12) => get(`/dashboard/pools?at_risk_limit=${atRiskLimit}`),
   dashboard: (atRiskLimit = 12) => get(`/dashboard?at_risk_limit=${atRiskLimit}`),
   stats: () => get("/stats"),
   requests: (limit = 20) => get(`/requests?limit=${limit}`),

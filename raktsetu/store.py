@@ -222,7 +222,12 @@ def _table_exists(name: str) -> bool:
         _ddb.meta.client.describe_table(TableName=name)
         return True
     except Exception:
-        return False
+        # Lambda IAM often grants Scan but not DescribeTable — probe with a cheap scan.
+        try:
+            _ddb.Table(name).scan(Limit=1)
+            return True
+        except Exception:
+            return False
 
 
 def _scan_table(table_name: str) -> list[dict]:

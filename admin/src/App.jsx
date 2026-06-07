@@ -56,11 +56,12 @@ function FillBar({ active, buffer, vacant, target }) {
   );
 }
 
-function BridgeDrawer({ patient, onClose }) {
+function BridgeDrawer({ patient, onClose, onRefresh }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [broadcast, setBroadcast] = useState(null);
   const [broadcasting, setBroadcasting] = useState(false);
+  const [voiceNote, setVoiceNote] = useState(null);
 
   useEffect(() => {
     if (!patient) return;
@@ -79,7 +80,7 @@ function BridgeDrawer({ patient, onClose }) {
 
   async function handleBroadcast() {
     if (!patient?.bridgeId) return;
-    setBroadcasting(true); setErr(null);
+    setBroadcasting(true); setErr(null); setVoiceNote(null);
     try {
       const res = await api.broadcastBridge(patient.bridgeId);
       setBroadcast(res);
@@ -96,6 +97,11 @@ function BridgeDrawer({ patient, onClose }) {
           try {
             const status = await api.broadcastOutreachStatus(bridgeId);
             const result = status.escalationCallResult || {};
+            if (status.appointmentBooked) {
+              setVoiceNote("Appointment booked — updating dashboard.");
+              onRefresh?.();
+              return;
+            }
             const placed = (
               status.voiceOutreachPlaced
               || status.escalationCallPlaced
@@ -103,7 +109,12 @@ function BridgeDrawer({ patient, onClose }) {
               || result.ok
               || result.voicePlaced
             );
-            if (placed) return;
+            if (placed && attempt >= 30) {
+              setVoiceNote(
+                "Call completed. If WhatsApp confirmation arrived, click Refresh on the dashboard for the appointment."
+              );
+              return;
+            }
             if (result.ok === false && result.reason) {
               const hint = result.reason === "missing_context"
                 ? "Engagement server was not using live DynamoDB — restart: cd engagement && bash scripts/run_server.sh"
@@ -111,17 +122,19 @@ function BridgeDrawer({ patient, onClose }) {
               setErr(`WhatsApp was sent, but the voice call failed (${hint}).`);
               return;
             }
-            if (attempt < 10) {
-              window.setTimeout(() => pollVoiceStatus(attempt + 1), 3000);
+            if (attempt < 30) {
+              window.setTimeout(() => pollVoiceStatus(attempt + 1), 5000);
               return;
             }
-            setErr("WhatsApp was sent, but no voice call confirmation yet. If your phone rang, you can ignore this.");
+            setVoiceNote(
+              "Voice may still be connecting. If you spoke with Tara and got WhatsApp confirmation, click Refresh on the dashboard."
+            );
           } catch {
             /* ignore poll errors */
           }
         };
 
-        window.setTimeout(() => pollVoiceStatus(0), (delaySec + 5) * 1000);
+        window.setTimeout(() => pollVoiceStatus(0), Math.max(8, delaySec + 5) * 1000);
       }
     } catch (e) {
       setErr(formatApiError(e));
@@ -168,6 +181,9 @@ function BridgeDrawer({ patient, onClose }) {
             WhatsApp sent from {broadcast.senderPhone || "Blood Warriors bot"} to {broadcast.demoPhone}
             ({broadcast.donorsTargeted} ranked donors).
             If no reply in {broadcast.callDelaySec}s, a voice call will follow to the same number.
+            {voiceNote && (
+              <span className="block mt-1 text-ink/80">{voiceNote}</span>
+            )}
           </div>
         )}
         {!data && !err && (
@@ -238,6 +254,7 @@ export default function App() {
   const [appointments, setAppointments] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [poolsLoading, setPoolsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState(null);
   const [formingPatientId, setFormingPatientId] = useState(null);
@@ -252,21 +269,30 @@ export default function App() {
   }
 
   async function refresh(initial = false) {
-    if (initial) setLoading(true);
-    else setRefreshing(true);
+    if (initial) {
+      setLoading(true);
+      setPoolsLoading(true);
+    } else {
+      setRefreshing(true);
+    }
     setError(null);
     try {
-      const d = await api.dashboard(12);
-      setStats(d.stats);
-      setBridges(d.bridges);
-      setUnbridged(d.unbridged);
-      setAtRisk(d.atRisk);
-      setRequests(d.requests);
-      setAppointments(d.appointments);
+      const summary = await api.dashboardSummary();
+      setStats(summary.stats);
+      setBridges(summary.bridges);
+      setRequests(summary.requests);
+      setAppointments(summary.appointments);
+      setLoading(false);
+      setRefreshing(false);
+
+      const pools = await api.dashboardPools(12);
+      setUnbridged(pools.unbridged);
+      setAtRisk(pools.atRisk);
     } catch (e) {
       setError(formatApiError(e));
     } finally {
       setLoading(false);
+      setPoolsLoading(false);
       setRefreshing(false);
     }
   }
@@ -404,6 +430,9 @@ export default function App() {
         <div className="grid lg:grid-cols-2 gap-6">
           <Section title="Unbridged patients"
             sub="No committed bridge yet — form a 6+4 plan or broadcast to donors once planned.">
+            {poolsLoading && !unbridged ? (
+              <div className="py-8 text-center text-muted text-sm animate-pulse">Loading donor pools…</div>
+            ) : (
             <table className="w-full text-sm">
               <thead>
                 <tr className={thCls}><th className="text-left py-2 font-semibold">Patient</th><th>Group</th>
@@ -431,10 +460,14 @@ export default function App() {
                 )}
               </tbody>
             </table>
+            )}
           </Section>
 
           <Section title="At-risk patients"
             sub="Thinnest eligible + compatible donor pools — watch these first.">
+            {poolsLoading && !atRisk ? (
+              <div className="py-8 text-center text-muted text-sm animate-pulse">Loading at-risk list…</div>
+            ) : (
             <table className="w-full text-sm">
               <thead>
                 <tr className={thCls}><th className="text-left py-2 font-semibold">Patient</th><th>Group</th>
@@ -455,6 +488,7 @@ export default function App() {
                 ))}
               </tbody>
             </table>
+            )}
           </Section>
         </div>
 
@@ -599,7 +633,7 @@ export default function App() {
         )}
       </main>
 
-      <BridgeDrawer patient={selected} onClose={() => setSelected(null)} />
+      <BridgeDrawer patient={selected} onClose={() => setSelected(null)} onRefresh={() => refresh(false)} />
     </div>
   );
 }
