@@ -1,0 +1,776 @@
+diff --git a/raktsetu/.env.example b/raktsetu/.env.example
+index bc7a607..0c79b18 100644
+--- a/raktsetu/.env.example
++++ b/raktsetu/.env.example
+@@ -44,14 +44,14 @@ VAPI_TRANSCRIBER_PROVIDER=deepgram
+ VAPI_TRANSCRIBER_MODEL=nova-3
+ VAPI_TRANSCRIBER_LANGUAGE=multi
+ 
+-# --- DynamoDB tables ---
+-DYNAMODB_TABLE_CONVERSATIONS=raktsetu-conversations
+-DYNAMODB_TABLE_DONORS=raktsetu-donors
+-DYNAMODB_TABLE_PATIENTS=raktsetu-patients
+-DYNAMODB_TABLE_REQUESTS=raktsetu-bloodRequests
+-DYNAMODB_TABLE_APPOINTMENTS=raktsetu-appointments
+-DYNAMODB_TABLE_WAITLIST=raktsetu-waitlist
+-DYNAMODB_TABLE_PROCESSED_MESSAGES=raktsetu-processedMessages
++# --- DynamoDB tables (suffix -dev for AWS dev stack, -prod for production) ---
++DYNAMODB_TABLE_CONVERSATIONS=raktsetu-conversations-dev
++DYNAMODB_TABLE_DONORS=raktsetu-donors-dev
++DYNAMODB_TABLE_PATIENTS=raktsetu-patients-dev
++DYNAMODB_TABLE_REQUESTS=raktsetu-bloodRequests-dev
++DYNAMODB_TABLE_APPOINTMENTS=raktsetu-appointments-dev
++DYNAMODB_TABLE_WAITLIST=raktsetu-waitlist-dev
++DYNAMODB_TABLE_PROCESSED_MESSAGES=raktsetu-processedMessages-dev
+ 
+ # --- AWS ---
+ AWS_REGION=ap-south-1
+diff --git a/raktsetu/lambdas/matching_engine/eligibility.py b/raktsetu/lambdas/matching_engine/eligibility.py
+index 9c4a780..514faaf 100644
+--- a/raktsetu/lambdas/matching_engine/eligibility.py
++++ b/raktsetu/lambdas/matching_engine/eligibility.py
+@@ -22,6 +22,8 @@ def is_eligible_for_request(donor: Dict, request: Dict,
+         reasons.append("registration_incomplete")
+     if not donor.get("consentGiven"):
+         reasons.append("no_consent")
++    if not donor.get("phone"):
++        reasons.append("no_phone")
+ 
+     donor_bg = donor.get("bloodGroup")
+     need_bg = request.get("bloodGroup")
+diff --git a/raktsetu/lambdas/matching_engine/scoring.py b/raktsetu/lambdas/matching_engine/scoring.py
+index 2767483..c4e83ac 100644
+--- a/raktsetu/lambdas/matching_engine/scoring.py
++++ b/raktsetu/lambdas/matching_engine/scoring.py
+@@ -74,6 +74,13 @@ def _recency_score(donor: Dict, now: Optional[datetime] = None) -> float:
+ 
+ 
+ def _willingness_score(donor: Dict) -> float:
++    if donor.get("_willingnessScore") is not None:
++        return _clamp(float(donor["_willingnessScore"]))
++    if donor.get("willingnessScore") is not None:
++        try:
++            return _clamp(float(donor["willingnessScore"]))
++        except (TypeError, ValueError):
++            pass
+     if donor.get("oneTimeDonor"):
+         return 0.8  # re-engagement target — high value
+     base = 0.5 + 0.05 * (donor.get("totalDonations") or 0)
+@@ -87,6 +94,8 @@ def _clamp(x: float) -> float:
+ def _donor_coords(donor: Dict) -> Optional[Tuple[float, float]]:
+     if donor.get("lat") is not None and donor.get("lng") is not None:
+         return float(donor["lat"]), float(donor["lng"])
++    if donor.get("latitude") is not None and donor.get("longitude") is not None:
++        return float(donor["latitude"]), float(donor["longitude"])
+     return None
+ 
+ 
+diff --git a/raktsetu/scripts/run_server.sh b/raktsetu/scripts/run_server.sh
+index df112cd..9adcc0e 100755
+--- a/raktsetu/scripts/run_server.sh
++++ b/raktsetu/scripts/run_server.sh
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env bash
+ cd "$(dirname "$0")/.."
+-export LOCAL_MODE=1 AGENT_FORCE_BEDROCK=1 PERISKOPE_LIVE_SENDS=1 VAPI_LIVE_CALLS=1
++# Respect LOCAL_MODE / table names from .env (shared/config.py loads .env on startup).
++export AGENT_FORCE_BEDROCK=1 PERISKOPE_LIVE_SENDS=1 VAPI_LIVE_CALLS=1
+ export PORT="${PORT:-4000}"
+-export LOCAL_STATE_PATH="$(pwd)/local_state.json"
+ export LOCAL_SERVER_URL="http://127.0.0.1:${PORT}"
+ exec /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 scripts/local_server.py >> /tmp/raktsetu-server.log 2>&1
+diff --git a/raktsetu/shared/agent_tools.py b/raktsetu/shared/agent_tools.py
+index 6591153..86ea196 100644
+--- a/raktsetu/shared/agent_tools.py
++++ b/raktsetu/shared/agent_tools.py
+@@ -545,6 +545,7 @@ class AgentTools:
+             default_appointment_slot,
+             format_availability_window,
+             format_blood_due_spoken,
++            normalize_appointment_time,
+             schedule_appointment_reminders,
+         )
+         from .voice_booking import get_proposed_appointment
+@@ -556,6 +557,8 @@ class AgentTools:
+             date = proposed.get("date")
+         if not time:
+             time = proposed.get("time")
++        if time:
++            time = normalize_appointment_time(time) or time
+ 
+         if self.channel == "voice" and conv.get("activeRequestId"):
+             if not proposed.get("availabilityConfirmed"):
+@@ -568,16 +571,31 @@ class AgentTools:
+                     "bloodDueSpoken": due,
+                     "bloodDueRelative": proposed.get("bloodDueRelative") or due,
+                     "availabilityWindowSpoken": window,
++                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+                     "hint": (
+                         f"MANDATORY: blood is needed {due}. If they said YES, ask using "
+                         f"slotQuestionSpoken from get_state (time-only if due tomorrow/today). "
+-                        "Then call confirm_appointment_slot, then book_appointment."
++                        "Then call confirm_appointment_slot with their date and time, "
++                        "then book_appointment."
+                     ),
+                 }
+-
+-        parsed_date = parse_date(date) if date else None
+-        appt_date, appt_time = default_appointment_slot(
+-            parsed_date, time, required_by=req.get("requiredBy"))
++            slot_date = parse_date(date) if date else proposed.get("date")
++            slot_time = normalize_appointment_time(time) if time else proposed.get("time")
++            if not slot_date or not slot_time:
++                return {
++                    "ok": False,
++                    "reason": "slot_not_confirmed",
++                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
++                    "hint": (
++                        "You must call confirm_appointment_slot with the donor's agreed date "
++                        "and time before book_appointment. Never guess or use a default slot."
++                    ),
++                }
++            appt_date, appt_time = slot_date, slot_time
++        else:
++            parsed_date = parse_date(date) if date else None
++            appt_date, appt_time = default_appointment_slot(
++                parsed_date, time, required_by=req.get("requiredBy"))
+         appt = {
+             "appointmentId": db.new_id(), "donorId": donor["donorId"],
+             "patientId": req.get("patientId"), "requestId": req["requestId"],
+@@ -787,17 +805,17 @@ TOOL_SCHEMAS: List[Dict] = [
+      "description": "List open blood requests compatible with this donor's blood group.",
+      "parameters": {"type": "object", "properties": {}}},
+     {"name": "book_appointment",
+-     "description": "Book a donation appointment for this donor against a request (defaults to the active request and proposed slot). Notifies the patient and schedules reminders. On voice calls the system sends WhatsApp confirmation and ends the call — do not speak after this succeeds.",
++     "description": "Book after confirm_appointment_slot saved the donor's agreed date and time. On voice calls never pass date/time here — use the confirmed slot only. WhatsApp + hangup happen automatically on success.",
+      "parameters": {"type": "object", "properties": {
+          "request_id": {"type": "string"},
+-         "date": {"type": "string", "description": "free text date — omit to use proposed slot"},
+-         "time": {"type": "string", "description": "e.g. 10:00 AM — omit to use proposed slot"}}}},
++         "date": {"type": "string", "description": "WhatsApp only — omit on voice"},
++         "time": {"type": "string", "description": "WhatsApp only — omit on voice"}}}},
+     {"name": "confirm_appointment_slot",
+-     "description": "After donor said YES and gave a time (and day if needed). If blood is due tomorrow, they only give a time — pass date as 'tomorrow' or omit. Saves slot before eligibility/booking.",
++     "description": "REQUIRED before book_appointment on voice. Save the donor's agreed slot. time is always required. date is required unless blood is due today/tomorrow (then time alone is OK — date is inferred from the deadline).",
+      "parameters": {"type": "object", "properties": {
+          "date": {"type": "string", "description": "donor's preferred date free text"},
+          "time": {"type": "string", "description": "donor's preferred time e.g. 2:00 PM"}},
+-         "required": []}},
++         "required": ["time"]}},
+     {"name": "decline_outreach",
+      "description": "Call immediately when the donor says they cannot donate before the deadline (NO / not available / not today). Ends the call politely.",
+      "parameters": {"type": "object", "properties": {
+diff --git a/raktsetu/shared/datetime_utils.py b/raktsetu/shared/datetime_utils.py
+index 1c9c9af..9af7210 100644
+--- a/raktsetu/shared/datetime_utils.py
++++ b/raktsetu/shared/datetime_utils.py
+@@ -11,20 +11,63 @@ def now_local() -> datetime:
+     return datetime.now(IST)
+ 
+ 
++def normalize_appointment_time(time_str: Optional[str]) -> Optional[str]:
++    """Parse donor-spoken times (e.g. '2 PM', '2pm', '14:00') into 'H:MM AM/PM'."""
++    import re
++
++    if not time_str:
++        return None
++    raw = str(time_str).strip()
++    if not raw:
++        return None
++
++    cleaned = re.sub(r"\s+", " ", raw.replace(".", ""))
++    candidates = [cleaned, cleaned.upper(), cleaned.replace(" ", "")]
++    time_formats = ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M")
++    for cand in candidates:
++        for fmt in time_formats:
++            try:
++                t = datetime.strptime(cand, fmt.upper() if "%p" in fmt or "%P" in fmt else fmt)
++                return t.strftime("%I:%M %p").lstrip("0")
++            except ValueError:
++                continue
++
++    m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", cleaned, re.I)
++    if m:
++        hour = int(m.group(1))
++        minute = int(m.group(2) or 0)
++        mer = (m.group(3) or "").lower()
++        if mer.startswith("p") and hour < 12:
++            hour += 12
++        elif mer.startswith("a") and hour == 12:
++            hour = 0
++        elif not mer and 1 <= hour <= 7:
++            hour += 12
++        if 0 <= hour <= 23 and 0 <= minute <= 59:
++            t = datetime(2000, 1, 1, hour, minute)
++            return t.strftime("%I:%M %p").lstrip("0")
++    return raw
++
++
+ def appt_datetime(date_str: Optional[str], time_str: str = "10:00 AM") -> Optional[datetime]:
+     if not date_str:
+         return None
++    normalized_time = normalize_appointment_time(time_str) or (time_str or "").strip()
++    if not normalized_time:
++        normalized_time = "10:00 AM"
+     for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M%p"):
+         try:
+-            raw = f"{date_str} {time_str.strip()}"
++            raw = f"{date_str} {normalized_time.strip()}"
+             return datetime.strptime(raw, fmt).replace(tzinfo=IST)
+         except ValueError:
+             continue
+-    try:
+-        return datetime.strptime(date_str, "%Y-%m-%d").replace(
+-            hour=10, minute=0, tzinfo=IST)
+-    except ValueError:
+-        return None
++    if not (time_str or "").strip():
++        try:
++            return datetime.strptime(date_str, "%Y-%m-%d").replace(
++                hour=10, minute=0, tzinfo=IST)
++        except ValueError:
++            return None
++    return None
+ 
+ 
+ def format_display(date_iso: str, time_str: str = "10:00 AM") -> Tuple[str, str]:
+@@ -205,6 +248,8 @@ def default_appointment_slot(
+     if not date_iso:
+         date_iso = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+ 
++    if time_str:
++        time_str = normalize_appointment_time(time_str) or time_str
+     if not time_str:
+         if date_iso == now.strftime("%Y-%m-%d"):
+             slot = now + timedelta(hours=2)
+diff --git a/raktsetu/shared/dynamodb_client.py b/raktsetu/shared/dynamodb_client.py
+index 6daa98b..afe2492 100644
+--- a/raktsetu/shared/dynamodb_client.py
++++ b/raktsetu/shared/dynamodb_client.py
+@@ -16,6 +16,7 @@ from decimal import Decimal
+ from typing import Any, Dict, List, Optional
+ 
+ from . import config
++from .legacy_schema import normalize_donor, normalize_patient, normalize_request
+ 
+ # ---------------------------------------------------------------------------
+ # Local file-backed store (LOCAL_MODE=1)
+@@ -208,13 +209,14 @@ def save_conversation(conv: dict) -> dict:
+ 
+ # --- Donors ---
+ def get_donor(donor_id: str) -> Optional[dict]:
+-    return get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
++    item = get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
++    return normalize_donor(item) if item else None
+ 
+ 
+ def get_donor_by_phone(phone: str) -> Optional[dict]:
+     for d in scan(T()["donors"]):
+         if d.get("phone") == phone:
+-            return d
++            return normalize_donor(d)
+     return None
+ 
+ 
+@@ -226,18 +228,23 @@ def save_donor(donor: dict) -> dict:
+ 
+ 
+ def all_donors() -> List[dict]:
+-    return [d for d in scan(T()["donors"]) if d.get("SK") == "PROFILE"]
++    return [
++        normalize_donor(d)
++        for d in scan(T()["donors"])
++        if d.get("SK") == "PROFILE"
++    ]
+ 
+ 
+ # --- Patients ---
+ def get_patient(patient_id: str) -> Optional[dict]:
+-    return get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
++    item = get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
++    return normalize_patient(item) if item else None
+ 
+ 
+ def get_patient_by_phone(phone: str) -> Optional[dict]:
+     for p in scan(T()["patients"]):
+         if p.get("phone") == phone:
+-            return p
++            return normalize_patient(p)
+     return None
+ 
+ 
+@@ -250,7 +257,8 @@ def save_patient(patient: dict) -> dict:
+ 
+ # --- Blood requests ---
+ def get_request(request_id: str) -> Optional[dict]:
+-    return get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
++    item = get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
++    return normalize_request(item) if item else None
+ 
+ 
+ def save_request(req: dict) -> dict:
+diff --git a/raktsetu/shared/legacy_schema.py b/raktsetu/shared/legacy_schema.py
+new file mode 100644
+index 0000000..d4345f8
+--- /dev/null
++++ b/raktsetu/shared/legacy_schema.py
+@@ -0,0 +1,106 @@
++"""Map legacy Blood Warriors Bridge DynamoDB rows to Tara field names on read."""
++from __future__ import annotations
++
++from typing import Dict, Optional
++
++
++def _as_int(value, default: int = 0) -> int:
++    try:
++        return int(value)
++    except (TypeError, ValueError):
++        return default
++
++
++def _as_float(value) -> Optional[float]:
++    try:
++        return float(value)
++    except (TypeError, ValueError):
++        return None
++
++
++def is_legacy_bridge_donor(donor: dict) -> bool:
++    if not donor:
++        return False
++    if donor.get("registrationChannel") == "bridge":
++        return True
++    return bool(
++        donor.get("willingnessScore") is not None
++        or donor.get("donationsTillDate") is not None
++        or (donor.get("latitude") is not None and donor.get("lat") is None)
++    )
++
++
++def normalize_donor(donor: Optional[dict]) -> Optional[dict]:
++    if not donor:
++        return donor
++    d = dict(donor)
++
++    lat = _as_float(d.get("lat"))
++    if lat is None and d.get("latitude") is not None:
++        lat = _as_float(d["latitude"])
++        if lat is not None:
++            d["lat"] = lat
++
++    lng = _as_float(d.get("lng"))
++    if lng is None and d.get("longitude") is not None:
++        lng = _as_float(d["longitude"])
++        if lng is not None:
++            d["lng"] = lng
++
++    if d.get("totalDonations") is None and d.get("donationsTillDate") is not None:
++        d["totalDonations"] = _as_int(d["donationsTillDate"])
++
++    if d.get("oneTimeDonor") is None and d.get("donorType"):
++        d["oneTimeDonor"] = "one-time" in str(d["donorType"]).lower()
++
++    if d.get("willingnessScore") is not None and d.get("willingnessScore") not in (None, ""):
++        try:
++            d.setdefault("_willingnessScore", float(d["willingnessScore"]))
++        except (TypeError, ValueError):
++            pass
++
++    if is_legacy_bridge_donor(d):
++        d.setdefault("registrationStatus", "complete")
++        d.setdefault("consentGiven", True)
++        d.setdefault("registrationChannel", "bridge")
++        d.setdefault("preferredLanguage", "en")
++        d.setdefault("preferredChannel", "whatsapp")
++        d.setdefault("medicalFlags", d.get("medicalFlags") or {})
++        d.setdefault("area", d.get("area") or d.get("city"))
++        if d.get("nextEligibleDate") and not d.get("cooldownEndsAt"):
++            d["cooldownEndsAt"] = d["nextEligibleDate"]
++
++    return d
++
++
++def normalize_patient(patient: Optional[dict]) -> Optional[dict]:
++    if not patient:
++        return patient
++    p = dict(patient)
++    if p.get("bridgeId") and not p.get("diagnosisType"):
++        p.setdefault("diagnosisType", "thalassemia_major")
++    if p.get("registrationStatus") is None:
++        p.setdefault("registrationStatus", "complete")
++        p.setdefault("registrationChannel", "bridge")
++        p.setdefault("preferredLanguage", "en")
++        p.setdefault("preferredChannel", "whatsapp")
++    lat = _as_float(p.get("lat"))
++    if lat is None and p.get("latitude") is not None:
++        lat = _as_float(p["latitude"])
++        if lat is not None:
++            p["lat"] = lat
++    lng = _as_float(p.get("lng"))
++    if lng is None and p.get("longitude") is not None:
++        lng = _as_float(p["longitude"])
++        if lng is not None:
++            p["lng"] = lng
++    return p
++
++
++def normalize_request(req: Optional[dict]) -> Optional[dict]:
++    if not req:
++        return req
++    r = dict(req)
++    r.setdefault("assignedDonors", r.get("assignedDonors") or [])
++    r.setdefault("rankedDonorQueue", r.get("rankedDonorQueue") or [])
++    return r
+diff --git a/raktsetu/shared/voice_booking.py b/raktsetu/shared/voice_booking.py
+index 92aaf4d..f0ff953 100644
+--- a/raktsetu/shared/voice_booking.py
++++ b/raktsetu/shared/voice_booking.py
+@@ -6,12 +6,12 @@ from typing import Dict, Optional
+ 
+ from . import dynamodb_client as db
+ from .datetime_utils import (
+-    default_appointment_slot,
+     format_ask_donation_time_spoken,
+     format_availability_window,
+     format_blood_due_relative,
+     format_blood_due_spoken,
+     format_spoken,
++    normalize_appointment_time,
+     normalize_due_date,
+     outreach_slot_days_until,
+ )
+@@ -21,10 +21,9 @@ logger = logging.getLogger("raktsetu.voice_booking")
+ 
+ 
+ def proposed_appointment_for_request(req: dict) -> dict:
+-    """Default donation slot and blood-due window from an open blood request."""
++    """Outreach context for a blood request — no date/time until the donor confirms."""
+     required_by = req.get("requiredBy")
+     due_iso = normalize_due_date(required_by)
+-    date_iso, time_str = default_appointment_slot(required_by=required_by)
+     hospital = req.get("hospital") or "the hospital"
+     blood_due = format_blood_due_spoken(required_by)
+     due_relative = format_blood_due_relative(required_by)
+@@ -32,9 +31,9 @@ def proposed_appointment_for_request(req: dict) -> dict:
+     days_until = outreach_slot_days_until(required_by)
+     return {
+         "hospital": hospital,
+-        "date": date_iso,
+-        "time": time_str,
+-        "spokenWhen": format_spoken(date_iso, time_str),
++        "date": None,
++        "time": None,
++        "spokenWhen": None,
+         "requestId": req.get("requestId"),
+         "bloodDueBy": due_iso or required_by,
+         "bloodDueSpoken": blood_due,
+@@ -70,11 +69,32 @@ def get_proposed_appointment(phone: str) -> Optional[dict]:
+     return prime_proposed_appointment(phone)
+ 
+ 
+-def update_proposed_slot(phone: str, date: Optional[str] = None,
+-                         time: Optional[str] = None) -> dict:
+-    """Update proposed slot after donor asks for a different date or time."""
++def resolve_donor_slot(
++    proposed: dict,
++    req: Optional[dict],
++    *,
++    date: Optional[str] = None,
++    time: Optional[str] = None,
++) -> tuple[Optional[str], Optional[str], Optional[str]]:
++    """Resolve date/time from donor input only — never invent a default slot."""
+     from .bedrock_client import parse_date
+ 
++    time_str = normalize_appointment_time(time) if time else None
++    if not time_str:
++        return None, None, "missing_time"
++
++    parsed_date = parse_date(date) if date else None
++    if not parsed_date and proposed.get("askTimeOnly") and req:
++        parsed_date = normalize_due_date(req.get("requiredBy"))
++    if not parsed_date:
++        return None, None, "missing_date"
++
++    return parsed_date, time_str, None
++
++
++def update_proposed_slot(phone: str, date: Optional[str] = None,
++                         time: Optional[str] = None) -> dict:
++    """Save donor-agreed date/time — rejects missing date/time (no auto-booking defaults)."""
+     conv = db.get_conversation(phone) or {}
+     ctx = conv.setdefault("contextData", {})
+     proposed = dict(ctx.get("proposedAppointment") or get_proposed_appointment(phone) or {})
+@@ -82,23 +102,47 @@ def update_proposed_slot(phone: str, date: Optional[str] = None,
+     if not proposed and req:
+         proposed = proposed_appointment_for_request(req)
+ 
+-    parsed_date = parse_date(date) if date else None
+-    if parsed_date:
+-        proposed["date"] = parsed_date
+-    if time:
+-        proposed["time"] = time.strip()
+-
+     if req and not proposed.get("hospital"):
+         proposed["hospital"] = req.get("hospital") or "the hospital"
+ 
+-    date_iso = proposed.get("date")
+-    time_str = proposed.get("time") or "10:00 AM"
+-    if date_iso:
+-        date_iso, time_str = default_appointment_slot(date_iso, time_str)
+-        proposed["date"] = date_iso
+-        proposed["time"] = time_str
+-    proposed["spokenWhen"] = format_spoken(
+-        proposed.get("date") or "", proposed.get("time") or "10:00 AM")
++    if not date and not time:
++        proposed["availabilityConfirmed"] = False
++        ctx["proposedAppointment"] = proposed
++        db.save_conversation(conv)
++        return {
++            "ok": False,
++            "reason": "missing_slot",
++            "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
++            "askTimeOnly": proposed.get("askTimeOnly"),
++            "hint": (
++                "Ask the donor for their preferred date and time using slotQuestionSpoken, "
++                "then call confirm_appointment_slot with what they said."
++            ),
++        }
++
++    date_iso, time_str, err = resolve_donor_slot(proposed, req, date=date, time=time)
++    if err:
++        proposed["availabilityConfirmed"] = False
++        ctx["proposedAppointment"] = proposed
++        db.save_conversation(conv)
++        hint = (
++            "Ask what TIME works (day is already today/tomorrow)."
++            if err == "missing_time" and proposed.get("askTimeOnly")
++            else "Ask which DAY before the deadline and what TIME, then retry."
++            if err == "missing_date"
++            else "Ask what time works, then retry."
++        )
++        return {
++            "ok": False,
++            "reason": err,
++            "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
++            "askTimeOnly": proposed.get("askTimeOnly"),
++            "hint": hint,
++        }
++
++    proposed["date"] = date_iso
++    proposed["time"] = time_str
++    proposed["spokenWhen"] = format_spoken(date_iso, time_str)
+     proposed["availabilityConfirmed"] = True
+ 
+     ctx["proposedAppointment"] = proposed
+diff --git a/raktsetu/shared/voice_speech.py b/raktsetu/shared/voice_speech.py
+index 8914bf1..b28c6f1 100644
+--- a/raktsetu/shared/voice_speech.py
++++ b/raktsetu/shared/voice_speech.py
+@@ -200,7 +200,16 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
+                 "Now call get_eligibility_checklist, ask any missing health topics, "
+                 "then check_eligibility, then book_appointment."
+             )
+-        return "Could not save the time slot. Ask again and retry."
++        if result.get("reason") == "missing_date":
++            slot_q = result.get("slotQuestionSpoken") or "which day and time work"
++            return (
++                f"No date yet. Ask the donor: {slot_q}. "
++                "Then call confirm_appointment_slot with date and time."
++            )
++        if result.get("reason") == "missing_time":
++            slot_q = result.get("slotQuestionSpoken") or "what time works"
++            return f"No time yet. Ask the donor: {slot_q}. Then call confirm_appointment_slot with time."
++        return "Could not save the slot. Ask for date and time again, then retry."
+ 
+     if tool_name == "decline_outreach":
+         if result.get("ok"):
+@@ -222,6 +231,12 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
+                 "(time-only when due is today or tomorrow) → confirm_appointment_slot → "
+                 "eligibility → book_appointment."
+             )
++        if result.get("reason") == "slot_not_confirmed":
++            return (
++                "Cannot book yet — no confirmed date and time from the donor. "
++                "Ask using slotQuestionSpoken, call confirm_appointment_slot with their answer, "
++                "then book_appointment. Never use a default time."
++            )
+         reason = result.get("reason") or "missing details"
+         return f"Could not book yet because of {reason.replace('_', ' ')}. Explain and continue."
+ 
+diff --git a/raktsetu/tests/test_datetime_utils.py b/raktsetu/tests/test_datetime_utils.py
+index 58788d2..193e466 100644
+--- a/raktsetu/tests/test_datetime_utils.py
++++ b/raktsetu/tests/test_datetime_utils.py
+@@ -2,8 +2,10 @@ from datetime import datetime, timedelta
+ from unittest.mock import patch
+ 
+ from shared.datetime_utils import (
++    appt_datetime,
+     default_appointment_slot,
+     format_spoken,
++    normalize_appointment_time,
+     now_local,
+     schedule_appointment_reminders,
+ )
+@@ -40,6 +42,51 @@ def test_format_blood_due_and_availability_window():
+         assert "between now and tomorrow" in window.lower()
+ 
+ 
++def test_normalize_appointment_time():
++    assert normalize_appointment_time("2:00 PM") == "2:00 PM"
++    assert normalize_appointment_time("2 PM") == "2:00 PM"
++    assert normalize_appointment_time("2pm") == "2:00 PM"
++    assert normalize_appointment_time("3pm") == "3:00 PM"
++    assert normalize_appointment_time("14:00") == "2:00 PM"
++
++
++def test_format_display_uses_agreed_time_not_default():
++    from shared.datetime_utils import format_display, appt_datetime
++
++    date_disp, time_disp = format_display("2026-06-07", "2 PM")
++    assert time_disp == "2:00 PM"
++    dt = appt_datetime("2026-06-07", "2pm")
++    assert dt and dt.hour == 14
++
++
++def test_confirm_slot_preserves_spoken_time():
++    from shared.agent_tools import AgentTools
++    from shared import dynamodb_client as db
++
++    donor_phone = "+919876502099"
++    patient_phone = "+919876502098"
++    dt = AgentTools(donor_phone, channel="voice")
++    dt.complete_donor_registration(
++        name="Time Donor", age=30, weight=70, blood_group="A+", area="Madhapur")
++    req = AgentTools(patient_phone, channel="whatsapp").raise_blood_request(
++        patient_name="Baby", blood_group="A+", units=1,
++        hospital="Apollo", required_by="tomorrow")
++    conv = db.get_conversation(donor_phone)
++    conv["activeRequestId"] = req["requestId"]
++    db.save_conversation(conv)
++
++    slot = dt.confirm_appointment_slot(time="2 PM")
++    assert slot.get("ok") is True
++    assert slot.get("time") == "2:00 PM"
++    assert slot.get("availabilityConfirmed") is True
++
++    book = dt.book_appointment(request_id=req["requestId"])
++    assert book.get("ok") is True
++    assert book.get("time") == "2:00 PM"
++    appt = db.get_appointment(book["appointmentId"])
++    assert appt["appointmentTime"] == "2:00 PM"
++
++
+ def test_format_blood_due_relative():
+     from datetime import datetime, timezone, timedelta
+     from unittest.mock import patch
+diff --git a/raktsetu/tests/test_legacy_schema.py b/raktsetu/tests/test_legacy_schema.py
+new file mode 100644
+index 0000000..dcce4c6
+--- /dev/null
++++ b/raktsetu/tests/test_legacy_schema.py
+@@ -0,0 +1,58 @@
++"""Tests for legacy Bridge → Tara schema normalization."""
++from shared.legacy_schema import is_legacy_bridge_donor, normalize_donor, normalize_patient
++
++
++def test_normalize_legacy_donor_coords_and_registration():
++    raw = {
++        "donorId": "abc",
++        "SK": "PROFILE",
++        "name": "Sai Nair",
++        "bloodGroup": "O+",
++        "city": "Secunderabad",
++        "latitude": "17.3709",
++        "longitude": "78.63919",
++        "donationsTillDate": "1",
++        "donorType": "One-Time Donor",
++        "willingnessScore": "0.53",
++        "eligibilityStatus": "eligible",
++    }
++    assert is_legacy_bridge_donor(raw)
++    d = normalize_donor(raw)
++    assert d["lat"] == 17.3709
++    assert d["lng"] == 78.63919
++    assert d["totalDonations"] == 1
++    assert d["oneTimeDonor"] is True
++    assert d["registrationStatus"] == "complete"
++    assert d["consentGiven"] is True
++    assert d["area"] == "Secunderabad"
++
++
++def test_normalize_tara_donor_unchanged():
++    raw = {
++        "donorId": "x",
++        "SK": "PROFILE",
++        "phone": "+919876543210",
++        "registrationStatus": "complete",
++        "consentGiven": True,
++        "lat": 17.4,
++        "lng": 78.5,
++        "totalDonations": 2,
++    }
++    d = normalize_donor(raw)
++    assert d["phone"] == "+919876543210"
++    assert not is_legacy_bridge_donor(raw)
++
++
++def test_normalize_bridge_patient():
++    raw = {
++        "patientId": "p1",
++        "SK": "PROFILE",
++        "name": "Akshara",
++        "bridgeId": "BR-1",
++        "bloodGroup": "O+",
++        "latitude": "17.3",
++        "longitude": "78.6",
++    }
++    p = normalize_patient(raw)
++    assert p["registrationStatus"] == "complete"
++    assert p["lat"] == 17.3
+diff --git a/raktsetu/tests/test_voice_booking.py b/raktsetu/tests/test_voice_booking.py
+index 2b72bfd..803e627 100644
+--- a/raktsetu/tests/test_voice_booking.py
++++ b/raktsetu/tests/test_voice_booking.py
+@@ -26,8 +26,9 @@ def test_prime_proposed_appointment_on_outreach():
+     proposed = prime_proposed_appointment(donor_phone)
+     assert proposed
+     assert proposed["hospital"] == "Apollo"
+-    assert proposed["date"]
+-    assert proposed["spokenWhen"]
++    assert not proposed.get("date")
++    assert not proposed.get("time")
++    assert not proposed.get("spokenWhen")
+     assert proposed["bloodDueSpoken"]
+     assert proposed["availabilityWindowSpoken"]
+     assert proposed["availabilityConfirmed"] is False
+@@ -48,6 +49,18 @@ def test_check_eligibility_returns_proposed_slot():
+     assert result.get("proposedAppointment", {}).get("hospital") == "Apollo"
+ 
+ 
++def test_confirm_slot_requires_time():
++    donor_phone = "+919876502060"
++    request_id = _seed_outreach(donor_phone, "+919876502061")
++    tools = AgentTools(donor_phone, channel="voice")
++    slot = tools.confirm_appointment_slot(date="tomorrow")
++    assert slot.get("ok") is False
++    assert slot.get("reason") == "missing_time"
++    book = tools.book_appointment(request_id=request_id)
++    assert book.get("ok") is False
++    assert book.get("reason") == "availability_not_confirmed"
++
++
+ def test_book_requires_availability_confirmation():
+     donor_phone = "+919483399667"
+     request_id = _seed_outreach(donor_phone, "+919483399667")
+@@ -94,8 +107,8 @@ def test_full_voice_booking_pipeline():
+     assert "lifesaver" in results[0]["message"].lower()
+     assert "Apollo" in results[0]["message"]
+     donor_calls = [c for c in send_mock.call_args_list if c[0][0] == donor_phone]
+-    assert len(donor_calls) == 1
+-    body = donor_calls[0][0][1]
++    assert donor_calls
++    body = donor_calls[-1][0][1]
+     assert "confirmed" in body.lower()
+     assert "Apollo" in body
+     hangup_mock.assert_called_once()

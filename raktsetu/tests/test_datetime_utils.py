@@ -2,8 +2,10 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from shared.datetime_utils import (
+    appt_datetime,
     default_appointment_slot,
     format_spoken,
+    normalize_appointment_time,
     now_local,
     schedule_appointment_reminders,
 )
@@ -38,6 +40,51 @@ def test_format_blood_due_and_availability_window():
         assert "tomorrow" in format_blood_due_spoken("tomorrow").lower()
         window = format_availability_window("tomorrow")
         assert "between now and tomorrow" in window.lower()
+
+
+def test_normalize_appointment_time():
+    assert normalize_appointment_time("2:00 PM") == "2:00 PM"
+    assert normalize_appointment_time("2 PM") == "2:00 PM"
+    assert normalize_appointment_time("2pm") == "2:00 PM"
+    assert normalize_appointment_time("3pm") == "3:00 PM"
+    assert normalize_appointment_time("14:00") == "2:00 PM"
+
+
+def test_format_display_uses_agreed_time_not_default():
+    from shared.datetime_utils import format_display, appt_datetime
+
+    date_disp, time_disp = format_display("2026-06-07", "2 PM")
+    assert time_disp == "2:00 PM"
+    dt = appt_datetime("2026-06-07", "2pm")
+    assert dt and dt.hour == 14
+
+
+def test_confirm_slot_preserves_spoken_time():
+    from shared.agent_tools import AgentTools
+    from shared import dynamodb_client as db
+
+    donor_phone = "+919876502099"
+    patient_phone = "+919876502098"
+    dt = AgentTools(donor_phone, channel="voice")
+    dt.complete_donor_registration(
+        name="Time Donor", age=30, weight=70, blood_group="A+", area="Madhapur")
+    req = AgentTools(patient_phone, channel="whatsapp").raise_blood_request(
+        patient_name="Baby", blood_group="A+", units=1,
+        hospital="Apollo", required_by="tomorrow")
+    conv = db.get_conversation(donor_phone)
+    conv["activeRequestId"] = req["requestId"]
+    db.save_conversation(conv)
+
+    slot = dt.confirm_appointment_slot(time="2 PM")
+    assert slot.get("ok") is True
+    assert slot.get("time") == "2:00 PM"
+    assert slot.get("availabilityConfirmed") is True
+
+    book = dt.book_appointment(request_id=req["requestId"])
+    assert book.get("ok") is True
+    assert book.get("time") == "2:00 PM"
+    appt = db.get_appointment(book["appointmentId"])
+    assert appt["appointmentTime"] == "2:00 PM"
 
 
 def test_format_blood_due_relative():

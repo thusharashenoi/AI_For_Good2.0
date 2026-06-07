@@ -1,0 +1,12 @@
+# Merge these into your local .env (not committed — contains secrets).
+# After merging, restart: screen -S raktsetu -X quit; screen -dmS raktsetu scripts/run_server.sh
+
+LOCAL_MODE=0
+
+DYNAMODB_TABLE_CONVERSATIONS=raktsetu-conversations-dev
+DYNAMODB_TABLE_DONORS=raktsetu-donors-dev
+DYNAMODB_TABLE_PATIENTS=raktsetu-patients-dev
+DYNAMODB_TABLE_REQUESTS=raktsetu-bloodRequests-dev
+DYNAMODB_TABLE_APPOINTMENTS=raktsetu-appointments-dev
+DYNAMODB_TABLE_WAITLIST=raktsetu-waitlist-dev
+DYNAMODB_TABLE_PROCESSED_MESSAGES=raktsetu-processedMessages-dev

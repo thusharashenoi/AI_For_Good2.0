@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from . import config
+from .legacy_schema import normalize_donor, normalize_patient, normalize_request
 
 # ---------------------------------------------------------------------------
 # Local file-backed store (LOCAL_MODE=1)
@@ -208,13 +209,14 @@ def save_conversation(conv: dict) -> dict:
 
 # --- Donors ---
 def get_donor(donor_id: str) -> Optional[dict]:
-    return get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
+    item = get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
+    return normalize_donor(item) if item else None
 
 
 def get_donor_by_phone(phone: str) -> Optional[dict]:
     for d in scan(T()["donors"]):
         if d.get("phone") == phone:
-            return d
+            return normalize_donor(d)
     return None
 
 
@@ -226,18 +228,23 @@ def save_donor(donor: dict) -> dict:
 
 
 def all_donors() -> List[dict]:
-    return [d for d in scan(T()["donors"]) if d.get("SK") == "PROFILE"]
+    return [
+        normalize_donor(d)
+        for d in scan(T()["donors"])
+        if d.get("SK") == "PROFILE"
+    ]
 
 
 # --- Patients ---
 def get_patient(patient_id: str) -> Optional[dict]:
-    return get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
+    item = get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
+    return normalize_patient(item) if item else None
 
 
 def get_patient_by_phone(phone: str) -> Optional[dict]:
     for p in scan(T()["patients"]):
         if p.get("phone") == phone:
-            return p
+            return normalize_patient(p)
     return None
 
 
@@ -250,7 +257,8 @@ def save_patient(patient: dict) -> dict:
 
 # --- Blood requests ---
 def get_request(request_id: str) -> Optional[dict]:
-    return get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
+    item = get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
+    return normalize_request(item) if item else None
 
 
 def save_request(req: dict) -> dict:

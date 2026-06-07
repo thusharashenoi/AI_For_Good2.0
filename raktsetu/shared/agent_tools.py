@@ -545,6 +545,7 @@ class AgentTools:
             default_appointment_slot,
             format_availability_window,
             format_blood_due_spoken,
+            normalize_appointment_time,
             schedule_appointment_reminders,
         )
         from .voice_booking import get_proposed_appointment
@@ -556,6 +557,8 @@ class AgentTools:
             date = proposed.get("date")
         if not time:
             time = proposed.get("time")
+        if time:
+            time = normalize_appointment_time(time) or time
 
         if self.channel == "voice" and conv.get("activeRequestId"):
             if not proposed.get("availabilityConfirmed"):
@@ -568,16 +571,31 @@ class AgentTools:
                     "bloodDueSpoken": due,
                     "bloodDueRelative": proposed.get("bloodDueRelative") or due,
                     "availabilityWindowSpoken": window,
+                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
                     "hint": (
                         f"MANDATORY: blood is needed {due}. If they said YES, ask using "
                         f"slotQuestionSpoken from get_state (time-only if due tomorrow/today). "
-                        "Then call confirm_appointment_slot, then book_appointment."
+                        "Then call confirm_appointment_slot with their date and time, "
+                        "then book_appointment."
                     ),
                 }
-
-        parsed_date = parse_date(date) if date else None
-        appt_date, appt_time = default_appointment_slot(
-            parsed_date, time, required_by=req.get("requiredBy"))
+            slot_date = parse_date(date) if date else proposed.get("date")
+            slot_time = normalize_appointment_time(time) if time else proposed.get("time")
+            if not slot_date or not slot_time:
+                return {
+                    "ok": False,
+                    "reason": "slot_not_confirmed",
+                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+                    "hint": (
+                        "You must call confirm_appointment_slot with the donor's agreed date "
+                        "and time before book_appointment. Never guess or use a default slot."
+                    ),
+                }
+            appt_date, appt_time = slot_date, slot_time
+        else:
+            parsed_date = parse_date(date) if date else None
+            appt_date, appt_time = default_appointment_slot(
+                parsed_date, time, required_by=req.get("requiredBy"))
         appt = {
             "appointmentId": db.new_id(), "donorId": donor["donorId"],
             "patientId": req.get("patientId"), "requestId": req["requestId"],
@@ -787,17 +805,17 @@ TOOL_SCHEMAS: List[Dict] = [
      "description": "List open blood requests compatible with this donor's blood group.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "book_appointment",
-     "description": "Book a donation appointment for this donor against a request (defaults to the active request and proposed slot). Notifies the patient and schedules reminders. On voice calls the system sends WhatsApp confirmation and ends the call — do not speak after this succeeds.",
+     "description": "Book after confirm_appointment_slot saved the donor's agreed date and time. On voice calls never pass date/time here — use the confirmed slot only. WhatsApp + hangup happen automatically on success.",
      "parameters": {"type": "object", "properties": {
          "request_id": {"type": "string"},
-         "date": {"type": "string", "description": "free text date — omit to use proposed slot"},
-         "time": {"type": "string", "description": "e.g. 10:00 AM — omit to use proposed slot"}}}},
+         "date": {"type": "string", "description": "WhatsApp only — omit on voice"},
+         "time": {"type": "string", "description": "WhatsApp only — omit on voice"}}}},
     {"name": "confirm_appointment_slot",
-     "description": "After donor said YES and gave a time (and day if needed). If blood is due tomorrow, they only give a time — pass date as 'tomorrow' or omit. Saves slot before eligibility/booking.",
+     "description": "REQUIRED before book_appointment on voice. Save the donor's agreed slot. time is always required. date is required unless blood is due today/tomorrow (then time alone is OK — date is inferred from the deadline).",
      "parameters": {"type": "object", "properties": {
          "date": {"type": "string", "description": "donor's preferred date free text"},
          "time": {"type": "string", "description": "donor's preferred time e.g. 2:00 PM"}},
-         "required": []}},
+         "required": ["time"]}},
     {"name": "decline_outreach",
      "description": "Call immediately when the donor says they cannot donate before the deadline (NO / not available / not today). Ends the call politely.",
      "parameters": {"type": "object", "properties": {

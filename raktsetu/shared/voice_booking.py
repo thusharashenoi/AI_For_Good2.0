@@ -6,12 +6,12 @@ from typing import Dict, Optional
 
 from . import dynamodb_client as db
 from .datetime_utils import (
-    default_appointment_slot,
     format_ask_donation_time_spoken,
     format_availability_window,
     format_blood_due_relative,
     format_blood_due_spoken,
     format_spoken,
+    normalize_appointment_time,
     normalize_due_date,
     outreach_slot_days_until,
 )
@@ -21,10 +21,9 @@ logger = logging.getLogger("raktsetu.voice_booking")
 
 
 def proposed_appointment_for_request(req: dict) -> dict:
-    """Default donation slot and blood-due window from an open blood request."""
+    """Outreach context for a blood request — no date/time until the donor confirms."""
     required_by = req.get("requiredBy")
     due_iso = normalize_due_date(required_by)
-    date_iso, time_str = default_appointment_slot(required_by=required_by)
     hospital = req.get("hospital") or "the hospital"
     blood_due = format_blood_due_spoken(required_by)
     due_relative = format_blood_due_relative(required_by)
@@ -32,9 +31,9 @@ def proposed_appointment_for_request(req: dict) -> dict:
     days_until = outreach_slot_days_until(required_by)
     return {
         "hospital": hospital,
-        "date": date_iso,
-        "time": time_str,
-        "spokenWhen": format_spoken(date_iso, time_str),
+        "date": None,
+        "time": None,
+        "spokenWhen": None,
         "requestId": req.get("requestId"),
         "bloodDueBy": due_iso or required_by,
         "bloodDueSpoken": blood_due,
@@ -70,11 +69,32 @@ def get_proposed_appointment(phone: str) -> Optional[dict]:
     return prime_proposed_appointment(phone)
 
 
-def update_proposed_slot(phone: str, date: Optional[str] = None,
-                         time: Optional[str] = None) -> dict:
-    """Update proposed slot after donor asks for a different date or time."""
+def resolve_donor_slot(
+    proposed: dict,
+    req: Optional[dict],
+    *,
+    date: Optional[str] = None,
+    time: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve date/time from donor input only — never invent a default slot."""
     from .bedrock_client import parse_date
 
+    time_str = normalize_appointment_time(time) if time else None
+    if not time_str:
+        return None, None, "missing_time"
+
+    parsed_date = parse_date(date) if date else None
+    if not parsed_date and proposed.get("askTimeOnly") and req:
+        parsed_date = normalize_due_date(req.get("requiredBy"))
+    if not parsed_date:
+        return None, None, "missing_date"
+
+    return parsed_date, time_str, None
+
+
+def update_proposed_slot(phone: str, date: Optional[str] = None,
+                         time: Optional[str] = None) -> dict:
+    """Save donor-agreed date/time — rejects missing date/time (no auto-booking defaults)."""
     conv = db.get_conversation(phone) or {}
     ctx = conv.setdefault("contextData", {})
     proposed = dict(ctx.get("proposedAppointment") or get_proposed_appointment(phone) or {})
@@ -82,23 +102,47 @@ def update_proposed_slot(phone: str, date: Optional[str] = None,
     if not proposed and req:
         proposed = proposed_appointment_for_request(req)
 
-    parsed_date = parse_date(date) if date else None
-    if parsed_date:
-        proposed["date"] = parsed_date
-    if time:
-        proposed["time"] = time.strip()
-
     if req and not proposed.get("hospital"):
         proposed["hospital"] = req.get("hospital") or "the hospital"
 
-    date_iso = proposed.get("date")
-    time_str = proposed.get("time") or "10:00 AM"
-    if date_iso:
-        date_iso, time_str = default_appointment_slot(date_iso, time_str)
-        proposed["date"] = date_iso
-        proposed["time"] = time_str
-    proposed["spokenWhen"] = format_spoken(
-        proposed.get("date") or "", proposed.get("time") or "10:00 AM")
+    if not date and not time:
+        proposed["availabilityConfirmed"] = False
+        ctx["proposedAppointment"] = proposed
+        db.save_conversation(conv)
+        return {
+            "ok": False,
+            "reason": "missing_slot",
+            "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+            "askTimeOnly": proposed.get("askTimeOnly"),
+            "hint": (
+                "Ask the donor for their preferred date and time using slotQuestionSpoken, "
+                "then call confirm_appointment_slot with what they said."
+            ),
+        }
+
+    date_iso, time_str, err = resolve_donor_slot(proposed, req, date=date, time=time)
+    if err:
+        proposed["availabilityConfirmed"] = False
+        ctx["proposedAppointment"] = proposed
+        db.save_conversation(conv)
+        hint = (
+            "Ask what TIME works (day is already today/tomorrow)."
+            if err == "missing_time" and proposed.get("askTimeOnly")
+            else "Ask which DAY before the deadline and what TIME, then retry."
+            if err == "missing_date"
+            else "Ask what time works, then retry."
+        )
+        return {
+            "ok": False,
+            "reason": err,
+            "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+            "askTimeOnly": proposed.get("askTimeOnly"),
+            "hint": hint,
+        }
+
+    proposed["date"] = date_iso
+    proposed["time"] = time_str
+    proposed["spokenWhen"] = format_spoken(date_iso, time_str)
     proposed["availabilityConfirmed"] = True
 
     ctx["proposedAppointment"] = proposed

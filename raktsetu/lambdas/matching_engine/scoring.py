@@ -74,6 +74,13 @@ def _recency_score(donor: Dict, now: Optional[datetime] = None) -> float:
 
 
 def _willingness_score(donor: Dict) -> float:
+    if donor.get("_willingnessScore") is not None:
+        return _clamp(float(donor["_willingnessScore"]))
+    if donor.get("willingnessScore") is not None:
+        try:
+            return _clamp(float(donor["willingnessScore"]))
+        except (TypeError, ValueError):
+            pass
     if donor.get("oneTimeDonor"):
         return 0.8  # re-engagement target — high value
     base = 0.5 + 0.05 * (donor.get("totalDonations") or 0)
@@ -87,6 +94,8 @@ def _clamp(x: float) -> float:
 def _donor_coords(donor: Dict) -> Optional[Tuple[float, float]]:
     if donor.get("lat") is not None and donor.get("lng") is not None:
         return float(donor["lat"]), float(donor["lng"])
+    if donor.get("latitude") is not None and donor.get("longitude") is not None:
+        return float(donor["latitude"]), float(donor["longitude"])
     return None
 
 

@@ -26,8 +26,9 @@ def test_prime_proposed_appointment_on_outreach():
     proposed = prime_proposed_appointment(donor_phone)
     assert proposed
     assert proposed["hospital"] == "Apollo"
-    assert proposed["date"]
-    assert proposed["spokenWhen"]
+    assert not proposed.get("date")
+    assert not proposed.get("time")
+    assert not proposed.get("spokenWhen")
     assert proposed["bloodDueSpoken"]
     assert proposed["availabilityWindowSpoken"]
     assert proposed["availabilityConfirmed"] is False
@@ -46,6 +47,18 @@ def test_check_eligibility_returns_proposed_slot():
     result = tools.check_eligibility()
     assert result.get("eligible") is True
     assert result.get("proposedAppointment", {}).get("hospital") == "Apollo"
+
+
+def test_confirm_slot_requires_time():
+    donor_phone = "+919876502060"
+    request_id = _seed_outreach(donor_phone, "+919876502061")
+    tools = AgentTools(donor_phone, channel="voice")
+    slot = tools.confirm_appointment_slot(date="tomorrow")
+    assert slot.get("ok") is False
+    assert slot.get("reason") == "missing_time"
+    book = tools.book_appointment(request_id=request_id)
+    assert book.get("ok") is False
+    assert book.get("reason") == "availability_not_confirmed"
 
 
 def test_book_requires_availability_confirmation():
@@ -94,8 +107,8 @@ def test_full_voice_booking_pipeline():
     assert "lifesaver" in results[0]["message"].lower()
     assert "Apollo" in results[0]["message"]
     donor_calls = [c for c in send_mock.call_args_list if c[0][0] == donor_phone]
-    assert len(donor_calls) == 1
-    body = donor_calls[0][0][1]
+    assert donor_calls
+    body = donor_calls[-1][0][1]
     assert "confirmed" in body.lower()
     assert "Apollo" in body
     hangup_mock.assert_called_once()

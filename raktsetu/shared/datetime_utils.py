@@ -11,20 +11,63 @@ def now_local() -> datetime:
     return datetime.now(IST)
 
 
+def normalize_appointment_time(time_str: Optional[str]) -> Optional[str]:
+    """Parse donor-spoken times (e.g. '2 PM', '2pm', '14:00') into 'H:MM AM/PM'."""
+    import re
+
+    if not time_str:
+        return None
+    raw = str(time_str).strip()
+    if not raw:
+        return None
+
+    cleaned = re.sub(r"\s+", " ", raw.replace(".", ""))
+    candidates = [cleaned, cleaned.upper(), cleaned.replace(" ", "")]
+    time_formats = ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p", "%H:%M")
+    for cand in candidates:
+        for fmt in time_formats:
+            try:
+                t = datetime.strptime(cand, fmt.upper() if "%p" in fmt or "%P" in fmt else fmt)
+                return t.strftime("%I:%M %p").lstrip("0")
+            except ValueError:
+                continue
+
+    m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", cleaned, re.I)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        mer = (m.group(3) or "").lower()
+        if mer.startswith("p") and hour < 12:
+            hour += 12
+        elif mer.startswith("a") and hour == 12:
+            hour = 0
+        elif not mer and 1 <= hour <= 7:
+            hour += 12
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            t = datetime(2000, 1, 1, hour, minute)
+            return t.strftime("%I:%M %p").lstrip("0")
+    return raw
+
+
 def appt_datetime(date_str: Optional[str], time_str: str = "10:00 AM") -> Optional[datetime]:
     if not date_str:
         return None
+    normalized_time = normalize_appointment_time(time_str) or (time_str or "").strip()
+    if not normalized_time:
+        normalized_time = "10:00 AM"
     for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M%p"):
         try:
-            raw = f"{date_str} {time_str.strip()}"
+            raw = f"{date_str} {normalized_time.strip()}"
             return datetime.strptime(raw, fmt).replace(tzinfo=IST)
         except ValueError:
             continue
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").replace(
-            hour=10, minute=0, tzinfo=IST)
-    except ValueError:
-        return None
+    if not (time_str or "").strip():
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").replace(
+                hour=10, minute=0, tzinfo=IST)
+        except ValueError:
+            return None
+    return None
 
 
 def format_display(date_iso: str, time_str: str = "10:00 AM") -> Tuple[str, str]:
@@ -205,6 +248,8 @@ def default_appointment_slot(
     if not date_iso:
         date_iso = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
+    if time_str:
+        time_str = normalize_appointment_time(time_str) or time_str
     if not time_str:
         if date_iso == now.strftime("%Y-%m-%d"):
             slot = now + timedelta(hours=2)

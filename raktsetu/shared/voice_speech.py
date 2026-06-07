@@ -200,7 +200,16 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
                 "Now call get_eligibility_checklist, ask any missing health topics, "
                 "then check_eligibility, then book_appointment."
             )
-        return "Could not save the time slot. Ask again and retry."
+        if result.get("reason") == "missing_date":
+            slot_q = result.get("slotQuestionSpoken") or "which day and time work"
+            return (
+                f"No date yet. Ask the donor: {slot_q}. "
+                "Then call confirm_appointment_slot with date and time."
+            )
+        if result.get("reason") == "missing_time":
+            slot_q = result.get("slotQuestionSpoken") or "what time works"
+            return f"No time yet. Ask the donor: {slot_q}. Then call confirm_appointment_slot with time."
+        return "Could not save the slot. Ask for date and time again, then retry."
 
     if tool_name == "decline_outreach":
         if result.get("ok"):
@@ -221,6 +230,12 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
                 "If NO, call decline_outreach. If YES, use slotQuestionSpoken from get_state "
                 "(time-only when due is today or tomorrow) → confirm_appointment_slot → "
                 "eligibility → book_appointment."
+            )
+        if result.get("reason") == "slot_not_confirmed":
+            return (
+                "Cannot book yet — no confirmed date and time from the donor. "
+                "Ask using slotQuestionSpoken, call confirm_appointment_slot with their answer, "
+                "then book_appointment. Never use a default time."
             )
         reason = result.get("reason") or "missing details"
         return f"Could not book yet because of {reason.replace('_', ' ')}. Explain and continue."
