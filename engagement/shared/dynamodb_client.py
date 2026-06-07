@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 import time
 import uuid
@@ -17,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from . import config
+from .legacy_schema import normalize_donor, normalize_patient, normalize_request
 
 # ---------------------------------------------------------------------------
 # Local file-backed store (LOCAL_MODE=1)
@@ -31,6 +31,7 @@ class _LocalStore:
     def __init__(self, path: str):
         self.path = path
         self._data: Dict[str, Dict[str, dict]] = {}
+        self._mtime: float = 0.0
         self._load()
 
     def _load(self) -> None:
@@ -38,12 +39,24 @@ class _LocalStore:
             try:
                 with open(self.path, "r", encoding="utf-8") as fh:
                     self._data = json.load(fh)
+                self._mtime = os.path.getmtime(self.path)
             except Exception:
                 self._data = {}
+        else:
+            self._data = {}
+
+    def _maybe_reload(self) -> None:
+        """Reload when another process (e.g. local_server.py) updated the file."""
+        if not os.path.exists(self.path):
+            return
+        mtime = os.path.getmtime(self.path)
+        if mtime > self._mtime:
+            self._load()
 
     def _flush(self) -> None:
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump(self._data, fh, indent=2, default=str)
+        self._mtime = os.path.getmtime(self.path)
 
     @staticmethod
     def _key(pk: str, sk: Optional[str]) -> str:
@@ -51,6 +64,7 @@ class _LocalStore:
 
     def put(self, table: str, item: dict, pk_attr: str, sk_attr: Optional[str]) -> None:
         with _lock:
+            self._maybe_reload()
             self._data.setdefault(table, {})
             key = self._key(item[pk_attr], item.get(sk_attr) if sk_attr else None)
             self._data[table][key] = item
@@ -58,14 +72,17 @@ class _LocalStore:
 
     def get(self, table: str, pk: str, sk: Optional[str]) -> Optional[dict]:
         with _lock:
+            self._maybe_reload()
             return self._data.get(table, {}).get(self._key(pk, sk))
 
     def scan(self, table: str) -> List[dict]:
         with _lock:
+            self._maybe_reload()
             return list(self._data.get(table, {}).values())
 
     def delete(self, table: str, pk: str, sk: Optional[str]) -> None:
         with _lock:
+            self._maybe_reload()
             self._data.get(table, {}).pop(self._key(pk, sk), None)
             self._flush()
 
@@ -181,31 +198,8 @@ T = config.table_names
 
 
 # --- Conversations ---
-def phone_keys(phone: str) -> List[str]:
-    """Lookup keys for a phone — DynamoDB may store +91… or digits-only."""
-    digits = re.sub(r"\D", "", phone or "")
-    if not digits:
-        return []
-    keys: List[str] = []
-    seen: set[str] = set()
-    for candidate in (phone, f"+{digits}", digits):
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            keys.append(candidate)
-    return keys
-
-
-def canonical_phone(phone: str) -> str:
-    digits = re.sub(r"\D", "", phone or "")
-    return f"+{digits}" if digits else phone
-
-
 def get_conversation(phone: str) -> Optional[dict]:
-    for key in phone_keys(phone):
-        hit = get_item(T()["conversations"], "phone_number", key)
-        if hit:
-            return hit
-    return None
+    return get_item(T()["conversations"], "phone_number", phone)
 
 
 def save_conversation(conv: dict) -> dict:
@@ -215,22 +209,23 @@ def save_conversation(conv: dict) -> dict:
 
 # --- Donors ---
 def get_donor(donor_id: str) -> Optional[dict]:
-    return get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
+    item = get_item(T()["donors"], "donorId", donor_id, "SK", "PROFILE")
+    return normalize_donor(item) if item else None
 
 
 def get_donor_by_phone(phone: str) -> Optional[dict]:
+    conv = get_conversation(phone)
+    if conv and conv.get("donorId"):
+        donor = get_donor(conv["donorId"])
+        if donor and donor.get("phone") == phone:
+            return donor
     for d in scan(T()["donors"]):
         if d.get("phone") == phone:
-            return d
+            return normalize_donor(d)
     return None
 
 
 def save_donor(donor: dict) -> dict:
-    try:
-        from . import intelligence_bridge as ib
-        donor = ib.enrich_donor(dict(donor))
-    except Exception:
-        pass
     donor.setdefault("SK", "PROFILE")
     donor["updatedAt"] = now_iso()
     donor.setdefault("createdAt", donor["updatedAt"])
@@ -238,27 +233,27 @@ def save_donor(donor: dict) -> dict:
 
 
 def all_donors() -> List[dict]:
-    return [d for d in scan(T()["donors"]) if d.get("SK") == "PROFILE"]
+    return [
+        normalize_donor(d)
+        for d in scan(T()["donors"])
+        if d.get("SK") == "PROFILE"
+    ]
 
 
 # --- Patients ---
 def get_patient(patient_id: str) -> Optional[dict]:
-    return get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
+    item = get_item(T()["patients"], "patientId", patient_id, "SK", "PROFILE")
+    return normalize_patient(item) if item else None
 
 
 def get_patient_by_phone(phone: str) -> Optional[dict]:
     for p in scan(T()["patients"]):
         if p.get("phone") == phone:
-            return p
+            return normalize_patient(p)
     return None
 
 
 def save_patient(patient: dict) -> dict:
-    try:
-        from . import intelligence_bridge as ib
-        patient = ib.enrich_patient(dict(patient))
-    except Exception:
-        pass
     patient.setdefault("SK", "PROFILE")
     patient["updatedAt"] = now_iso()
     patient.setdefault("createdAt", patient["updatedAt"])
@@ -267,7 +262,8 @@ def save_patient(patient: dict) -> dict:
 
 # --- Blood requests ---
 def get_request(request_id: str) -> Optional[dict]:
-    return get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
+    item = get_item(T()["requests"], "requestId", request_id, "SK", "REQUEST")
+    return normalize_request(item) if item else None
 
 
 def save_request(req: dict) -> dict:

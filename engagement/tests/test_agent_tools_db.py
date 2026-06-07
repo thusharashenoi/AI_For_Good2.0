@@ -3,6 +3,7 @@ from shared import dynamodb_client as db
 from shared import db_schema as schema
 from shared.agent_tools import AgentTools
 from lambdas.whatsapp_webhook import flows
+from conftest import DEMO_PHONE
 
 
 def _run_fsm(phone, *messages):
@@ -11,7 +12,7 @@ def _run_fsm(phone, *messages):
 
 
 def test_voice_donor_registration_fills_all_fields():
-    phone = "+919876500001"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.set_state(state="COLLECTING_NAME", user_type="donor", language="en")
     result = tools.complete_donor_registration(
@@ -38,7 +39,7 @@ def test_voice_donor_registration_fills_all_fields():
 
 
 def test_whatsapp_donor_registration_fills_all_fields():
-    phone = "+919876500002"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="whatsapp")
     tools.complete_donor_registration(
         name="WA Donor", age=28, weight=70, blood_group="A+",
@@ -50,7 +51,7 @@ def test_whatsapp_donor_registration_fills_all_fields():
 
 
 def test_partial_donor_fills_required_fields():
-    phone = "+919876500003"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Partial Donor", age=25, weight=40, blood_group="B+", area="Secunderabad")
@@ -61,7 +62,7 @@ def test_partial_donor_fills_required_fields():
 
 
 def test_underage_waitlist_fills_fields():
-    phone = "+919876500004"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="whatsapp")
     tools.set_state(language="hi")
     result = tools.complete_donor_registration(name="Young One", age=15, weight=50)
@@ -73,7 +74,7 @@ def test_underage_waitlist_fills_fields():
 
 
 def test_patient_request_fills_all_fields():
-    phone = "+919876500005"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="whatsapp")
     tools.set_state(language="te")
     result = tools.raise_blood_request(
@@ -101,8 +102,8 @@ def test_patient_request_fills_all_fields():
 
 
 def test_book_appointment_fills_all_fields():
-    donor_phone = "+919876500006"
-    patient_phone = "+919876500007"
+    donor_phone = DEMO_PHONE
+    patient_phone = DEMO_PHONE
     dt = AgentTools(donor_phone, channel="voice")
     dt.complete_donor_registration(
         name="Appt Donor", age=32, weight=72, blood_group="O+", area="LB Nagar")
@@ -116,7 +117,8 @@ def test_book_appointment_fills_all_fields():
     conv["activeRequestId"] = req_id
     db.save_conversation(conv)
 
-    book = dt.book_appointment(request_id=req_id, date="2026-06-10", time="11:00 AM")
+    dt.confirm_appointment_slot(date="2026-06-10", time="11:00 AM")
+    book = dt.book_appointment(request_id=req_id)
     assert book["ok"] is True
 
     appt = db.get_appointment(book["appointmentId"])
@@ -128,7 +130,7 @@ def test_book_appointment_fills_all_fields():
 
 
 def test_fsm_donor_matches_schema():
-    phone = "+919876500008"
+    phone = DEMO_PHONE
     _run_fsm(phone, "Hi", "1", "FSM Donor", "30", "70", "AB+", "Begumpet", "No, First Time")
     donor = db.get_donor_by_phone(phone)
     schema.assert_donor_complete(donor)
@@ -136,8 +138,8 @@ def test_fsm_donor_matches_schema():
 
 
 def test_fsm_appointment_has_blood_group():
-    donor_phone = "+919876500009"
-    patient_phone = "+919876500010"
+    donor_phone = DEMO_PHONE
+    patient_phone = DEMO_PHONE
     _run_fsm(donor_phone, "Hi", "1", "Match Donor", "30", "70", "A+", "Madhapur", "No, First Time")
     _run_fsm(patient_phone, "Hi", "2", "Match Patient", "8", "A+", "1", "NIMS", "in 3 days")
     req = db.scan(db.config.table_names()["requests"])[0]

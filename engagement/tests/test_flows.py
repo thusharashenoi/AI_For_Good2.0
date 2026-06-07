@@ -3,6 +3,7 @@ from shared import dynamodb_client as db
 from shared import db_schema as schema
 from shared import scheduler
 from lambdas.whatsapp_webhook import flows
+from conftest import DEMO_PHONE
 
 
 def _run(phone, *messages):
@@ -13,7 +14,7 @@ def _run(phone, *messages):
 
 
 def test_donor_registration_complete():
-    phone = "+919000000001"
+    phone = DEMO_PHONE
     _run(phone, "Hi", "1", "Rahul Kumar", "30", "70", "O+", "Madhapur", "No, First Time")
     donor = db.get_donor_by_phone(phone)
     assert donor is not None
@@ -24,7 +25,7 @@ def test_donor_registration_complete():
 
 
 def test_underage_goes_to_waitlist():
-    phone = "+919000000002"
+    phone = DEMO_PHONE
     replies = _run(phone, "Hi", "1", "Tiny Tim", "15")
     last = replies[-1][0]
     assert "18" in last
@@ -34,14 +35,14 @@ def test_underage_goes_to_waitlist():
 
 
 def test_underweight_partial_save():
-    phone = "+919000000003"
+    phone = DEMO_PHONE
     _run(phone, "Hi", "1", "Light Weight", "25", "40")
     donor = db.get_donor_by_phone(phone)
     schema.assert_donor_partial(donor)
 
 
 def test_blood_group_unknown_schedules_followup():
-    phone = "+919000000004"
+    phone = DEMO_PHONE
     _run(phone, "Hi", "1", "Dont Know", "28", "60", "don't know")
     conv = db.get_conversation(phone)
     assert conv["followUpScheduled"] is True
@@ -49,7 +50,7 @@ def test_blood_group_unknown_schedules_followup():
 
 
 def test_patient_request_starts_outreach():
-    phone = "+919000000005"
+    phone = DEMO_PHONE
     _run(phone, "Hi", "2", "Baby Anjali", "6", "B+", "2", "Rainbow Hospital", "tomorrow")
     reqs = db.scan(db.config.table_names()["requests"])
     assert len(reqs) == 1
@@ -60,7 +61,7 @@ def test_patient_request_starts_outreach():
 
 
 def test_language_switch_to_hindi():
-    phone = "+919000000006"
+    phone = DEMO_PHONE
     flows.handle_message(phone, "Hi")
     replies = flows.handle_message(phone, "hindi mein")
     conv = db.get_conversation(phone)
@@ -71,10 +72,10 @@ def test_language_switch_to_hindi():
 
 def test_full_match_to_appointment():
     # Register an eligible A+ donor.
-    donor_phone = "+919000000010"
+    donor_phone = DEMO_PHONE
     _run(donor_phone, "Hi", "1", "Donor One", "30", "70", "A+", "Madhapur", "No, First Time")
     # Patient raises an A+ request.
-    patient_phone = "+919000000011"
+    patient_phone = DEMO_PHONE
     _run(patient_phone, "Hi", "2", "Patient One", "10", "A+", "1", "Apollo", "in 3 days")
     req = db.scan(db.config.table_names()["requests"])[0]
 
@@ -102,7 +103,7 @@ def test_full_match_to_appointment():
 
 
 def test_ineligible_donor_deferred():
-    donor_phone = "+919000000020"
+    donor_phone = DEMO_PHONE
     _run(donor_phone, "Hi", "1", "Defer Donor", "30", "70", "O+", "Madhapur", "No, First Time")
     conv = db.get_conversation(donor_phone)
     conv["awaitingOutreachReply"] = True
@@ -118,7 +119,7 @@ def test_ineligible_donor_deferred():
 
 
 def test_delete_my_data():
-    phone = "+919000000030"
+    phone = DEMO_PHONE
     _run(phone, "Hi", "1", "Delete Me", "30", "70", "O+", "Madhapur", "No, First Time")
     assert db.get_donor_by_phone(phone) is not None
     flows.handle_message(phone, "DELETE MY DATA")

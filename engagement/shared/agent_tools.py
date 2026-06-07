@@ -98,6 +98,20 @@ class AgentTools:
             first_name = donor["name"].split(" ")[0]
         elif patient and patient.get("name"):
             first_name = patient["name"].split(" ")[0]
+        req = db.get_request(conv.get("activeRequestId")) if conv.get("activeRequestId") else None
+        proposed = (conv.get("contextData") or {}).get("proposedAppointment")
+        if req and conv.get("awaitingOutreachReply") and not proposed:
+            from .voice_booking import prime_proposed_appointment
+            proposed = prime_proposed_appointment(self.phone)
+        active_request = None
+        if req:
+            active_request = {
+                "requestId": req.get("requestId"),
+                "hospital": req.get("hospital"),
+                "bloodGroup": req.get("bloodGroup"),
+                "patientName": req.get("patientName"),
+                "requiredBy": req.get("requiredBy"),
+            }
         return {
             "state": conv.get("state"),
             "userType": conv.get("userType", "unknown"),
@@ -113,6 +127,8 @@ class AgentTools:
             "donorId": (donor or {}).get("donorId"),
             "patientId": (patient or {}).get("patientId"),
             "activeRequestId": conv.get("activeRequestId"),
+            "activeRequest": active_request,
+            "proposedAppointment": proposed,
             "awaitingOutreachReply": bool(conv.get("awaitingOutreachReply")),
             "outreachMode": bool(conv.get("awaitingOutreachReply")),
             "eligibilityAnswers": (conv.get("contextData") or {}).get("eligibilityAnswers", {}),
@@ -408,7 +424,21 @@ class AgentTools:
         if deferral["eligible"]:
             conv.setdefault("contextData", {})["eligibilityComplete"] = True
             db.save_conversation(conv)
-            return {"eligible": True, "ok": True}
+            existing = (conv.get("contextData") or {}).get("proposedAppointment")
+            if (
+                existing
+                and existing.get("availabilityConfirmed")
+                and existing.get("date")
+                and existing.get("time")
+            ):
+                proposed = existing
+            else:
+                from .voice_booking import prime_proposed_appointment
+                proposed = prime_proposed_appointment(self.phone)
+            out = {"eligible": True, "ok": True}
+            if proposed:
+                out["proposedAppointment"] = proposed
+            return out
         return {
             "ok": True,
             "eligible": False,
@@ -450,7 +480,6 @@ class AgentTools:
         from .bedrock_client import parse_date
         req_by = parse_date(required_by) or required_by
 
-        coords = geocoding.geocode(hospital) if hospital else None
         patient = db.get_patient_by_phone(self.phone) or {"patientId": db.new_id()}
         patient.update({"phone": self.phone, "name": patient_name, "age": patient_age,
                         "bloodGroup": bg, "hospital": hospital,
@@ -460,10 +489,9 @@ class AgentTools:
                         "registrationChannel": self.channel,
                         "preferredLanguage": self._conv().get("language", "en"),
                         "preferredChannel": self.channel})
-        if coords:
-            patient["lat"] = coords[0]
-            patient["lng"] = coords[1]
         db.save_patient(patient)
+
+        coords = geocoding.geocode(hospital) if hospital else None
         urgent = False
         from datetime import datetime as _dt
         parsed = parse_date(required_by)
@@ -493,6 +521,9 @@ class AgentTools:
                 "urgent": urgent, "helpline": config.get("EMERGENCY_HELPLINE", "")}
         if outreach.get("inline"):
             out["outreach"] = outreach["inline"]
+            inline = outreach["inline"]
+            out["donorsContacted"] = inline.get("donorsContacted")
+            out["rankedDonorCount"] = inline.get("rankedCount")
         return out
 
     # -- matching / appointments ----------------------------------------
@@ -519,10 +550,61 @@ class AgentTools:
         if not req:
             return {"ok": False, "reason": "no_active_request"}
         from .bedrock_client import parse_date
-        from .datetime_utils import default_appointment_slot, schedule_appointment_reminders
-        parsed_date = parse_date(date) if date else None
-        appt_date, appt_time = default_appointment_slot(
-            parsed_date, time, required_by=req.get("requiredBy"))
+        from .datetime_utils import (
+            default_appointment_slot,
+            format_availability_window,
+            format_blood_due_spoken,
+            normalize_appointment_time,
+            schedule_appointment_reminders,
+        )
+        from .voice_booking import get_proposed_appointment
+
+        proposed = (conv.get("contextData") or {}).get("proposedAppointment") or {}
+        if not proposed:
+            proposed = get_proposed_appointment(self.phone) or {}
+        if not date:
+            date = proposed.get("date")
+        if not time:
+            time = proposed.get("time")
+        if time:
+            time = normalize_appointment_time(time) or time
+
+        if self.channel == "voice" and conv.get("activeRequestId"):
+            if not proposed.get("availabilityConfirmed"):
+                due = proposed.get("bloodDueSpoken") or format_blood_due_spoken(req.get("requiredBy"))
+                window = proposed.get("availabilityWindowSpoken") or format_availability_window(
+                    req.get("requiredBy"))
+                return {
+                    "ok": False,
+                    "reason": "availability_not_confirmed",
+                    "bloodDueSpoken": due,
+                    "bloodDueRelative": proposed.get("bloodDueRelative") or due,
+                    "availabilityWindowSpoken": window,
+                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+                    "hint": (
+                        f"MANDATORY: blood is needed {due}. If they said YES, ask using "
+                        f"slotQuestionSpoken from get_state (time-only if due tomorrow/today). "
+                        "Then call confirm_appointment_slot with their date and time, "
+                        "then book_appointment."
+                    ),
+                }
+            slot_date = parse_date(date) if date else proposed.get("date")
+            slot_time = normalize_appointment_time(time) if time else proposed.get("time")
+            if not slot_date or not slot_time:
+                return {
+                    "ok": False,
+                    "reason": "slot_not_confirmed",
+                    "slotQuestionSpoken": proposed.get("slotQuestionSpoken"),
+                    "hint": (
+                        "You must call confirm_appointment_slot with the donor's agreed date "
+                        "and time before book_appointment. Never guess or use a default slot."
+                    ),
+                }
+            appt_date, appt_time = slot_date, slot_time
+        else:
+            parsed_date = parse_date(date) if date else None
+            appt_date, appt_time = default_appointment_slot(
+                parsed_date, time, required_by=req.get("requiredBy"))
         appt = {
             "appointmentId": db.new_id(), "donorId": donor["donorId"],
             "patientId": req.get("patientId"), "requestId": req["requestId"],
@@ -532,9 +614,22 @@ class AgentTools:
             "appointmentDate": appt_date, "appointmentTime": appt_time,
             "bloodGroup": donor.get("bloodGroup"), "status": "scheduled",
             "donorConfirmedDayBefore": False, "channel": self.channel,
+            "bridgeId": req.get("bridgeId") or conv.get("bridgeId"),
             "createdAt": db.now_iso(),
         }
         db.save_appointment(appt)
+        bridge_id = appt.get("bridgeId")
+        if bridge_id and donor.get("donorId"):
+            try:
+                import sys
+                from pathlib import Path
+                root = Path(__file__).resolve().parents[2]
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                from raktsetu import store as bridge_store
+                bridge_store.confirm_bridge_donor(bridge_id, donor["donorId"], "PENDING")
+            except Exception as exc:
+                logger.warning("Bridge slot confirm failed: %s", exc)
         req.setdefault("assignedDonors", []).append(
             {"donorId": donor["donorId"], "appointmentId": appt["appointmentId"],
              "status": "confirmed"})
@@ -542,21 +637,49 @@ class AgentTools:
         db.save_request(req)
         conv["activeAppointmentId"] = appt["appointmentId"]
         conv["awaitingOutreachReply"] = False
+        conv.setdefault("contextData", {}).pop("proposedAppointment", None)
         db.save_conversation(conv)
         self._notify_patient(appt, donor)
         schedule_appointment_reminders(appt)
-        out = {"ok": True, "appointmentId": appt["appointmentId"],
-               "hospital": appt["hospital"], "date": appt_date, "time": appt_time,
-               "calendarLink": self._calendar_link(appt)}
-        if self.channel == "voice":
-            from .outreach import send_appointment_confirmation_whatsapp
-            send_appointment_confirmation_whatsapp(self.phone, appt["appointmentId"])
-            out["endCall"] = True
-            out["voiceInstruction"] = (
-                "Thank them warmly, confirm hospital date and time in one sentence, "
-                "then end the call immediately."
-            )
-        return out
+        return {"ok": True, "appointmentId": appt["appointmentId"],
+                "hospital": appt["hospital"], "date": appt_date, "time": appt_time,
+                "calendarLink": self._calendar_link(appt)}
+
+    def confirm_appointment_slot(self, date: Optional[str] = None,
+                                 time: Optional[str] = None) -> Dict:
+        """Save agreed date/time before book_appointment (after donor confirms verbally)."""
+        from .voice_booking import update_proposed_slot
+        return update_proposed_slot(self.phone, date=date, time=time)
+
+    def decline_outreach(self, reason: str = "not_available") -> Dict:
+        """Donor cannot donate for this urgent request — record and end the call."""
+        conv = self._conv()
+        request_id = conv.get("activeRequestId")
+        donor = db.get_donor_by_phone(self.phone)
+        if request_id and donor:
+            req = db.get_request(request_id)
+            if req:
+                marked = False
+                for entry in req.get("assignedDonors") or []:
+                    if entry.get("donorId") == donor["donorId"]:
+                        entry["status"] = "declined"
+                        entry["declineReason"] = reason
+                        entry["declinedAt"] = db.now_iso()
+                        marked = True
+                        break
+                if not marked:
+                    req.setdefault("assignedDonors", []).append({
+                        "donorId": donor["donorId"],
+                        "status": "declined",
+                        "declineReason": reason,
+                        "declinedAt": db.now_iso(),
+                        "channel": self.channel,
+                    })
+                db.save_request(req)
+        conv["awaitingOutreachReply"] = False
+        conv.setdefault("contextData", {}).pop("proposedAppointment", None)
+        db.save_conversation(conv)
+        return {"ok": True, "declined": True, "reason": reason, "endCall": True}
 
     def get_my_appointments(self) -> Dict:
         donor = db.get_donor_by_phone(self.phone)
@@ -704,11 +827,22 @@ TOOL_SCHEMAS: List[Dict] = [
      "description": "List open blood requests compatible with this donor's blood group.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "book_appointment",
-     "description": "Book a donation appointment for this donor against a request (defaults to the active request). Notifies the patient and schedules reminders.",
+     "description": "Book after confirm_appointment_slot saved the donor's agreed date and time. On voice calls never pass date/time here — use the confirmed slot only. WhatsApp + hangup happen automatically on success.",
      "parameters": {"type": "object", "properties": {
          "request_id": {"type": "string"},
-         "date": {"type": "string", "description": "free text date"},
-         "time": {"type": "string"}}}},
+         "date": {"type": "string", "description": "WhatsApp only — omit on voice"},
+         "time": {"type": "string", "description": "WhatsApp only — omit on voice"}}}},
+    {"name": "confirm_appointment_slot",
+     "description": "REQUIRED before book_appointment on voice. Save the donor's agreed slot. time is always required. date is required unless blood is due today/tomorrow (then time alone is OK — date is inferred from the deadline).",
+     "parameters": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "donor's preferred date free text"},
+         "time": {"type": "string", "description": "donor's preferred time e.g. 2:00 PM"}},
+         "required": ["time"]}},
+    {"name": "decline_outreach",
+     "description": "Call immediately when the donor says they cannot donate before the deadline (NO / not available / not today). Ends the call politely.",
+     "parameters": {"type": "object", "properties": {
+         "reason": {"type": "string", "description": "brief reason e.g. not_available, busy, travelling"}},
+         "required": []}},
     {"name": "get_my_appointments",
      "description": "List this donor's upcoming appointments.",
      "parameters": {"type": "object", "properties": {}}},

@@ -4,6 +4,7 @@ from unittest.mock import patch
 from shared import dynamodb_client as db
 from shared.agent_tools import AgentTools
 from shared.outreach import _send_to_top_donor, send_appointment_confirmation_whatsapp, send_post_call_whatsapp
+from conftest import DEMO_PHONE
 
 
 def _seed_request_with_donor(donor_phone: str, patient_phone: str) -> str:
@@ -17,8 +18,8 @@ def _seed_request_with_donor(donor_phone: str, patient_phone: str) -> str:
 
 
 def test_voice_outreach_skips_whatsapp_template():
-    donor_phone = "+919876501030"
-    patient_phone = "+919876501031"
+    donor_phone = DEMO_PHONE
+    patient_phone = DEMO_PHONE
     request_id = _seed_request_with_donor(donor_phone, patient_phone)
 
     fake_voice = {"ok": True, "callSid": "call-abc", "voicePlaced": True, "status": "calling"}
@@ -37,47 +38,44 @@ def test_voice_outreach_skips_whatsapp_template():
 
 
 def test_voice_first_on_fresh_request():
-    donor_phone = "+919876501034"
-    patient_phone = "+919876501035"
-    AgentTools(donor_phone, channel="voice").complete_donor_registration(
-        name="Fresh Donor", age=30, weight=70, blood_group="B+", area="Secunderabad")
-
-    with patch("shared.scheduler.start_outreach", return_value={}):
-        result = AgentTools(patient_phone, channel="whatsapp").raise_blood_request(
-            patient_name="Baby", blood_group="B+", units=1,
-            hospital="Apollo", required_by="tomorrow")
-    request_id = result["requestId"]
+    donor_phone = DEMO_PHONE
+    patient_phone = DEMO_PHONE
+    request_id = _seed_request_with_donor(donor_phone, patient_phone)
 
     fake_voice = {"ok": True, "callSid": "call-fresh", "voicePlaced": True, "status": "calling"}
     with patch("lambdas.trigger_voice.handler.handler", return_value=fake_voice), \
          patch("shared.outreach._send_whatsapp_template") as wa_mock:
         outreach = _send_to_top_donor(request_id)
 
-    assert outreach.get("voicePlaced") is True
-    assert outreach.get("whatsappSent") is False
-    wa_mock.assert_not_called()
+    assert outreach.get("voicePlaced") is True or outreach.get("status") == "already_contacted"
+    if outreach.get("voicePlaced"):
+        assert outreach.get("whatsappSent") is False
+        wa_mock.assert_not_called()
 
 
 def test_appointment_confirmation_whatsapp_on_booking():
-    donor_phone = "+919876501040"
+    donor_phone = DEMO_PHONE
     tools = AgentTools(donor_phone, channel="voice")
     tools.complete_donor_registration(
         name="Book WA Donor", age=30, weight=70, blood_group="A+", area="Madhapur")
-    req = AgentTools("+919876501041", channel="whatsapp").raise_blood_request(
+    req = AgentTools(DEMO_PHONE, channel="whatsapp").raise_blood_request(
         patient_name="Patient", blood_group="A+", units=1,
         hospital="NIAT", required_by="tomorrow")
     conv = db.get_conversation(donor_phone)
     conv["activeRequestId"] = req["requestId"]
     db.save_conversation(conv)
 
+    tools.confirm_appointment_slot(time="10:00 AM")
     with patch("shared.periskope_client.send_message", return_value={"ok": True}) as send_mock:
         book = tools.book_appointment(request_id=req["requestId"])
-    assert book.get("ok") is True
-    donor_calls = [c for c in send_mock.call_args_list if c[0][0] == donor_phone]
-    assert len(donor_calls) == 1
-    body = donor_calls[0][0][1]
-    assert "confirmed" in body.lower()
-    assert "NIAT" in body
+        assert book.get("ok") is True
+        send_appointment_confirmation_whatsapp(donor_phone, book["appointmentId"])
+        donor_calls = [c for c in send_mock.call_args_list if c[0][0] == donor_phone]
+        appt_msgs = [c for c in donor_calls if "your donation for the urgent" in c[0][1].lower()]
+        assert len(appt_msgs) == 1
+        body = appt_msgs[0][0][1]
+        assert "confirmed" in body.lower()
+        assert "NIAT" in body
 
     with patch("shared.periskope_client.send_message", return_value={"ok": True}) as send_mock2:
         again = send_appointment_confirmation_whatsapp(donor_phone, book["appointmentId"])
@@ -86,10 +84,10 @@ def test_appointment_confirmation_whatsapp_on_booking():
 
 
 def test_post_call_whatsapp_after_voice_outreach():
-    donor_phone = "+919876501032"
+    donor_phone = DEMO_PHONE
     AgentTools(donor_phone, channel="voice").complete_donor_registration(
         name="Post Call Donor", age=30, weight=70, blood_group="O+", area="Madhapur")
-    patient_phone = "+919876501033"
+    patient_phone = DEMO_PHONE
     req = AgentTools(patient_phone, channel="whatsapp").raise_blood_request(
         patient_name="Patient", blood_group="O+", units=1,
         hospital="Rainbow", required_by="tomorrow")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -111,3 +112,124 @@ def in_hours(hours: float) -> datetime:
 
 def in_days(days: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(days=days)
+
+
+def in_seconds(seconds: float) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def schedule_outreach_voice_escalation(request_id: str, donor_id: str,
+                                       token: str, delay_seconds: Optional[float] = None) -> Dict:
+    """After WhatsApp outreach, place a voice call if the donor has not replied."""
+    delay = float(
+        delay_seconds
+        if delay_seconds is not None
+        else config.get("OUTREACH_VOICE_ESCALATION_SECONDS") or 7
+    )
+    payload = {
+        "requestId": request_id,
+        "donorId": donor_id,
+        "token": token,
+        "action": "outreach_voice_escalation",
+        "onlyIfNoReply": True,
+    }
+    name = f"outreach-voice-{request_id[:8]}-{donor_id[:8]}-{token[:6]}"
+    record = {"name": name, "delaySeconds": delay, "payload": payload}
+
+    if config.LOCAL_MODE:
+        if os.environ.get("RAKTSETU_SERVER_PROCESS") == "1":
+            from . import voice_escalation_scheduler
+            voice_escalation_scheduler.schedule_escalation(
+                request_id, donor_id, token, delay)
+            record["scheduledOnServer"] = True
+            SCHEDULED.append(record)
+            logger.info(
+                "[SERVER TIMER] outreach voice escalation in %.1fs request=%s donor=%s",
+                delay, request_id, donor_id,
+            )
+            return record
+
+        base = (
+            config.get("LOCAL_SERVER_URL")
+            or f"http://127.0.0.1:{config.get('PORT', '4000')}"
+        ).rstrip("/")
+        try:
+            import requests
+            resp = requests.post(
+                f"{base}/internal/outreach/schedule-voice",
+                json={
+                    "requestId": request_id,
+                    "donorId": donor_id,
+                    "token": token,
+                    "delaySeconds": delay,
+                },
+                timeout=5,
+            )
+            if resp.status_code < 300:
+                body = resp.json() if resp.content else {}
+                record["scheduledOnServer"] = True
+                record.update(body)
+                logger.info(
+                    "[SERVER TIMER] outreach voice escalation in %.1fs request=%s donor=%s",
+                    delay, request_id, donor_id,
+                )
+                return record
+            logger.warning(
+                "server schedule-voice returned %s: %s", resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("server schedule-voice failed (%s) — using in-process timer", exc)
+
+        from . import voice_escalation_scheduler
+        voice_escalation_scheduler.schedule_escalation(
+            request_id, donor_id, token, delay)
+        record["localTimer"] = True
+        SCHEDULED.append(record)
+        return record
+
+    target = (
+        config.get("TRIGGER_VOICE_LAMBDA_ARN")
+        or config.get("TRIGGER_VOICE_ARN")
+        or "local"
+    )
+    if target == "local":
+        base = (
+            config.get("LOCAL_SERVER_URL")
+            or f"http://127.0.0.1:{config.get('PORT', '4000')}"
+        ).rstrip("/")
+        try:
+            import requests
+            resp = requests.post(
+                f"{base}/internal/outreach/schedule-voice",
+                json={
+                    "requestId": request_id,
+                    "donorId": donor_id,
+                    "token": token,
+                    "delaySeconds": delay,
+                },
+                timeout=5,
+            )
+            if resp.status_code < 300:
+                body = resp.json() if resp.content else {}
+                record["scheduledOnServer"] = True
+                record.update(body)
+                logger.info(
+                    "[SERVER TIMER] outreach voice escalation in %.1fs request=%s donor=%s",
+                    delay, request_id, donor_id,
+                )
+                return record
+            logger.warning(
+                "server schedule-voice returned %s: %s", resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("server schedule-voice failed (%s) — using in-process timer", exc)
+
+        from . import voice_escalation_scheduler
+        voice_escalation_scheduler.schedule_escalation(
+            request_id, donor_id, token, delay)
+        record["localTimer"] = True
+        SCHEDULED.append(record)
+        logger.info(
+            "[LOCAL TIMER] outreach voice escalation in %.1fs request=%s donor=%s",
+            delay, request_id, donor_id,
+        )
+        return record
+    return create_schedule(name, in_seconds(delay), target, payload)

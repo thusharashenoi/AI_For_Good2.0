@@ -1,9 +1,10 @@
 """Natural conversation — bundled / out-of-order answers."""
 from shared.agent_tools import AgentTools
+from conftest import DEMO_PHONE
 
 
 def test_registration_from_saved_context():
-    phone = "+919876502001"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.set_state(user_type="donor", context_updates={
         "name": "Rahul Kumar", "age": 28, "weight": 70,
@@ -14,7 +15,7 @@ def test_registration_from_saved_context():
 
 
 def test_registration_missing_fields_returns_hint():
-    phone = "+919876502002"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.set_state(context_updates={"name": "Partial Person", "age": 30})
     result = tools.complete_donor_registration()
@@ -25,7 +26,7 @@ def test_registration_missing_fields_returns_hint():
 
 
 def test_set_state_reports_missing():
-    phone = "+919876502003"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     out = tools.set_state(context_updates={"name": "Anjali", "blood_group": "B+"})
     assert "name" not in out["missingForDonorRegistration"]
@@ -34,7 +35,7 @@ def test_set_state_reports_missing():
 
 
 def test_patient_request_from_bundled_context():
-    phone = "+919876502004"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="whatsapp")
     tools.set_state(user_type="patient", context_updates={
         "patient_name": "Baby Rao", "patient_age": 6, "blood_group": "B+",

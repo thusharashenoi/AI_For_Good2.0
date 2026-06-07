@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { DataSet } from "vis-data";
 import { Network } from "vis-network";
+import { shortId } from "./api.js";
 import "vis-network/styles/vis-network.min.css";
 
 const GROUP_COLORS = {
@@ -8,24 +9,48 @@ const GROUP_COLORS = {
   "B-": "#d97706", "B+": "#f59e0b", "AB-": "#7c3aed", "AB+": "#a78bfa",
 };
 
-function tooltip(node) {
-  const lines = [`<b>${node.label}</b>`];
+export function tooltipLines(node) {
+  if (!node) return [];
+  const lines = [node.label || "Unknown"];
   if (node.group) lines.push(`Blood group: ${node.group}`);
   if (node.city) lines.push(`City: ${node.city}`);
   if (node.kind === "patient") {
     if (node.reason === "unbridged") lines.push("Status: unbridged");
     if (node.reason === "under_strength") lines.push(`Bridge active: ${node.activeCount ?? "?"}/6`);
     if (node.reason === "bridge_center") lines.push("Bridge patient (center)");
+    if (node.reason === "patient_focus") lines.push("Patient focus");
+    if (node.bridgeId) lines.push(`Bridge: ${shortId(node.bridgeId)}`);
   }
   if (node.kind === "donor") {
     if (node.role === "free_pool") lines.push("Free pool donor (not in any bridge)");
     if (node.role === "active") lines.push("Bridge member · active slot");
     if (node.role === "buffer") lines.push("Bridge member · buffer slot");
     if (node.role === "bridge") lines.push("Bridge member");
-    if (node.role === "candidate") lines.push("Ranked candidate (free pool)");
+    if (node.role === "candidate") {
+      const hint = node.slotTypeHint ? ` · ${node.slotTypeHint} slot` : "";
+      lines.push(`Ranked candidate (free pool)${hint}`);
+    }
+    if (node.slotId) lines.push(`Slot: ${node.slotId}`);
+    if (node.backupFor) lines.push(`Backup for slot ${node.backupFor}`);
     if (node.showRate != null) lines.push(`Show-up: ${Math.round(node.showRate * 100)}%`);
   }
-  return lines.join("<br>");
+  return lines;
+}
+
+function GraphTooltip({ node, x, y }) {
+  if (!node) return null;
+  const lines = tooltipLines(node);
+  return (
+    <div
+      className="absolute z-20 pointer-events-none max-w-[220px] rounded-lg border border-line bg-surface px-3 py-2 shadow-lg text-xs text-ink overflow-hidden"
+      style={{ left: x + 14, top: y + 14 }}
+    >
+      <p className="font-semibold leading-snug break-words">{lines[0]}</p>
+      {lines.slice(1).map((line) => (
+        <p key={line} className="text-muted leading-snug mt-0.5 break-all">{line}</p>
+      ))}
+    </div>
+  );
 }
 
 function toVisNodes(nodes, showDonorLabels = false, highlightNodeId = null) {
@@ -34,7 +59,6 @@ function toVisNodes(nodes, showDonorLabels = false, highlightNodeId = null) {
     return {
       id: n.id,
       label: n.kind === "patient" || showDonorLabels ? n.label : "",
-      title: tooltip(n),
       shape: n.kind === "patient" ? "star" : "dot",
       size: n.kind === "patient" ? (selected ? 30 : 26) : 10 + (n.showRate ?? 0.8) * 10,
       color: {
@@ -67,7 +91,6 @@ function toVisEdges(edges) {
       from: e.from,
       to: e.to,
       value: e.score,
-      title: `Match ${(e.score * 100).toFixed(0)}%`,
       color: {
         color: isBridge ? "rgba(241,65,100,0.55)" : isCandidate ? "rgba(245,158,11,0.45)" : "rgba(148,163,184,0.35)",
         highlight: "#f14164",
@@ -85,8 +108,11 @@ export default function GraphNetwork({
   disableZoom = false,
 }) {
   const ref = useRef(null);
+  const wrapRef = useRef(null);
   const netRef = useRef(null);
   const nodesRef = useRef(null);
+  const [hoveredNode, setHoveredNode] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     if (!ref.current || !data?.nodes?.length) return;
@@ -128,6 +154,18 @@ export default function GraphNetwork({
     const network = new Network(ref.current, { nodes, edges }, options);
     netRef.current = network;
 
+    const onMove = (ev) => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setTooltipPos({ x: ev.clientX - rect.left, y: ev.clientY - rect.top });
+    };
+
+    network.on("hoverNode", (params) => {
+      const node = nodes.get(params.node);
+      setHoveredNode(node?._raw || null);
+    });
+    network.on("blurNode", () => setHoveredNode(null));
+
     if (onNodeClick) {
       network.on("click", (params) => {
         if (!params.nodes.length) return;
@@ -136,10 +174,14 @@ export default function GraphNetwork({
       });
     }
 
+    wrapRef.current?.addEventListener("mousemove", onMove);
+
     return () => {
+      wrapRef.current?.removeEventListener("mousemove", onMove);
       network.destroy();
       netRef.current = null;
       nodesRef.current = null;
+      setHoveredNode(null);
     };
   }, [data, layout, onNodeClick, disableZoom]);
 
@@ -172,9 +214,10 @@ export default function GraphNetwork({
   }
 
   return (
-    <div className="rounded-xl border border-line overflow-hidden bg-canvas shadow-inner"
+    <div ref={wrapRef} className="relative rounded-xl border border-line overflow-hidden bg-canvas shadow-inner"
       style={{ height }}>
       <div ref={ref} className="w-full h-full" />
+      <GraphTooltip node={hoveredNode} x={tooltipPos.x} y={tooltipPos.y} />
     </div>
   );
 }

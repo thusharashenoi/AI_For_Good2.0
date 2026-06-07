@@ -356,9 +356,36 @@ def confirm_bridge_donor(bridge_id: str, donor_id: str, status: str = "PENDING")
 def list_appointments(limit: int = 30) -> list[dict]:
     if not _table_exists(config.TABLE_APPOINTMENTS):
         return []
-    rows = [r for r in _scan_table(config.TABLE_APPOINTMENTS) if r.get("SK") == "APPT"]
+    rows = [
+        r for r in _scan_table(config.TABLE_APPOINTMENTS)
+        if r.get("SK") == "APPT" and str(r.get("status", "scheduled")).lower() != "cancelled"
+    ]
     rows.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
     return rows[:limit]
+
+
+def delete_request(request_id: str) -> bool:
+    """Remove one blood request (demo / ops cleanup)."""
+    if not _table_exists(config.TABLE_REQUESTS):
+        return False
+    table = _ddb.Table(config.TABLE_REQUESTS)
+    key = {"requestId": request_id, "SK": "REQUEST"}
+    if not table.get_item(Key=key).get("Item"):
+        return False
+    table.delete_item(Key=key)
+    return True
+
+
+def delete_appointment(appointment_id: str) -> bool:
+    """Remove one donation appointment (demo / ops cleanup)."""
+    if not _table_exists(config.TABLE_APPOINTMENTS):
+        return False
+    table = _ddb.Table(config.TABLE_APPOINTMENTS)
+    key = {"appointmentId": appointment_id, "SK": "APPT"}
+    if not table.get_item(Key=key).get("Item"):
+        return False
+    table.delete_item(Key=key)
+    return True
 
 
 def scan_bridges() -> list[dict]:

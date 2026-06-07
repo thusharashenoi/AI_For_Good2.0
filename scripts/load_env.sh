@@ -40,8 +40,12 @@ overrides = {
     "PERISKOPE_LIVE_SENDS": "1",
     "VAPI_LIVE_CALLS": "1",
     "TWILIO_INBOUND_POLL": "1",
+    "TWILIO_WHATSAPP_NUMBER": "whatsapp:+918433775356",
+    "PERISKOPE_PHONE": "918433775356",
     "DEMO_OUTREACH_PHONE": "+919372875356",
-    "DEMO_OUTREACH_CALL_DELAY_SEC": "30",
+    "DEMO_OUTREACH_CALL_DELAY_SEC": "7",
+    "OUTREACH_VOICE_ESCALATION_SECONDS": "7",
+    "LOCAL_SERVER_URL": "http://127.0.0.1:4000",
 }
 for k, v in overrides.items():
     os.environ[k] = v
@@ -52,7 +56,7 @@ def _digits(phone: str) -> str:
 
 demo = _digits(os.environ.get("DEMO_OUTREACH_PHONE", "918372875356"))
 periskope = _digits(os.environ.get("PERISKOPE_PHONE", ""))
-bot = _digits(os.environ.get("TWILIO_WHATSAPP_NUMBER", "")) or "919076150904"
+bot = _digits(os.environ.get("TWILIO_WHATSAPP_NUMBER", "")) or "918433775356"
 if not periskope or periskope == demo:
     os.environ["PERISKOPE_PHONE"] = bot
 

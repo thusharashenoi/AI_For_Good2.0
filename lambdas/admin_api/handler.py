@@ -14,7 +14,8 @@ Read-only endpoints powering the ops dashboard:
   GET /graph/patient/{id}  ranked donor pool for one patient (unbridged focus)
   POST /emergency/match     ad-hoc patient outside the registry
   GET /emergency/cities     Telangana cities for the emergency form
-  GET /healthz             liveness
+  GET /calendar/patients     bridged patients list (search via ?q=)
+  GET /calendar/patient/{id} transfusion calendar with donor coverage
 
 Runs locally with uvicorn (see scripts/run_admin_api.py) and in Lambda via the
 Mangum adapter exported as ``handler``.
@@ -23,13 +24,13 @@ from __future__ import annotations
 
 import copy
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 import pandas as pd
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from pydantic import BaseModel, Field
 
-from raktsetu import broadcast, config, emergency, store, synth
+from raktsetu import broadcast, calendar_plan, config, emergency, store, synth
 from raktsetu.bridge import formation_queue
 from raktsetu.graph import candidate_edges
 
@@ -481,6 +482,14 @@ def open_requests(limit: int = 20):
     return {"count": len(rows), "requests": rows}
 
 
+@app.delete("/requests/{request_id}")
+def delete_request(request_id: str):
+    """Delete an open blood request (demo cleanup)."""
+    if not store.delete_request(request_id):
+        raise HTTPException(status_code=404, detail="request not found")
+    return {"ok": True, "requestId": request_id}
+
+
 @app.post("/bridges/form/{patient_id}")
 def form_bridge(patient_id: str):
     """Form a bridge from the Blood Graph for one unbridged patient (admin action)."""
@@ -534,8 +543,8 @@ def form_bridge(patient_id: str):
 
 
 @app.post("/bridges/{bridge_id}/broadcast")
-def broadcast_bridge(bridge_id: str, background_tasks: BackgroundTasks):
-    """One WhatsApp to demo phone; Vapi call after 30s if no reply."""
+def broadcast_bridge(bridge_id: str):
+    """One WhatsApp to demo phone; Vapi call after threshold if no reply."""
     state = load_bridge_state(force=True)
     bridge = state.get(bridge_id)
     if not bridge:
@@ -563,14 +572,41 @@ def broadcast_bridge(bridge_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("reason") or "broadcast failed")
-    if result.get("broadcastId"):
-        background_tasks.add_task(
-            broadcast.run_call_escalation,
-            result["broadcastId"],
-            detail,
-            patient_name,
-        )
     return result
+
+
+@app.get("/bridges/{bridge_id}/outreach-status")
+def bridge_outreach_status(bridge_id: str):
+    """Poll voice escalation outcome after a broadcast (demo phone conversation)."""
+    import os
+    import sys
+    from pathlib import Path
+
+    eng = Path(__file__).resolve().parents[2] / "engagement"
+    if str(eng) not in sys.path:
+        sys.path.insert(0, str(eng))
+    from shared import dynamodb_client as db  # noqa: WPS433
+
+    demo = os.environ.get("DEMO_OUTREACH_PHONE", "+919372875356")
+    if not demo.startswith("+"):
+        demo = f"+{demo.lstrip('+')}"
+    conv = db.get_conversation(demo) or {}
+    for alt in (demo, demo.lstrip("+"), f"+{demo.lstrip('+')}"):
+        c = db.get_conversation(alt)
+        if c:
+            conv = c
+            break
+    result = conv.get("escalationCallResult") or {}
+    return {
+        "bridgeId": bridge_id,
+        "requestId": conv.get("activeRequestId"),
+        "voiceOutreachPlaced": bool(conv.get("voiceOutreachPlaced")),
+        "voiceEscalationScheduled": bool(conv.get("outreachEscalationToken")),
+        "escalationCallPlaced": bool(conv.get("escalationCallPlaced")),
+        "escalationCallResult": result,
+        "voiceCallId": conv.get("activeVoiceCallId"),
+        "whatsappSentAt": conv.get("outreachWhatsappSentAt"),
+    }
 
 
 @app.get("/appointments")
@@ -598,36 +634,53 @@ def list_appointments(limit: int = 20):
     return {"count": len(out), "appointments": out}
 
 
+@app.delete("/appointments/{appointment_id}")
+def delete_appointment(appointment_id: str):
+    """Delete a donation appointment (demo cleanup)."""
+    if not store.delete_appointment(appointment_id):
+        raise HTTPException(status_code=404, detail="appointment not found")
+    return {"ok": True, "appointmentId": appointment_id}
+
+
 @app.get("/dashboard")
 def dashboard(at_risk_limit: int = 12):
     """Single round-trip payload for the Operations tab (avoids 4 parallel Lambdas)."""
-    donors, patients = load_frames()
-    edges = load_edges()
-    bridge_state = load_bridge_state()
-    return {
-        "stats": _stats_payload(donors, patients, bridge_state),
-        "bridges": _bridges_payload(bridge_state, patients),
-        "unbridged": _unbridged_payload(patients, edges, bridge_state),
-        "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
-        "appointments": {"appointments": [
-            {
-                "appointmentId": a.get("appointmentId"),
-                "bridgeId": a.get("bridgeId"),
-                "donorName": a.get("donorName"),
-                "donorPhone": a.get("donorPhone"),
-                "patientName": a.get("patientName"),
-                "bloodGroup": a.get("bloodGroup"),
-                "hospital": a.get("hospital"),
-                "city": a.get("city"),
-                "appointmentDate": a.get("appointmentDate"),
-                "appointmentTime": a.get("appointmentTime"),
-                "status": a.get("status"),
-                "channel": a.get("channel"),
-                "createdAt": a.get("createdAt"),
-            }
-            for a in store.list_appointments(limit=12)
-        ]},
-    }
+    try:
+        donors, patients = load_frames()
+        edges = load_edges()
+        bridge_state = load_bridge_state()
+        try:
+            appts = store.list_appointments(limit=20)
+        except Exception:
+            appts = []
+        return {
+            "stats": _stats_payload(donors, patients, bridge_state),
+            "bridges": _bridges_payload(bridge_state, patients),
+            "unbridged": _unbridged_payload(patients, edges, bridge_state),
+            "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
+            "appointments": {"appointments": [
+                {
+                    "appointmentId": a.get("appointmentId"),
+                    "bridgeId": a.get("bridgeId"),
+                    "donorName": a.get("donorName"),
+                    "donorPhone": a.get("donorPhone"),
+                    "patientName": a.get("patientName"),
+                    "bloodGroup": a.get("bloodGroup"),
+                    "hospital": a.get("hospital"),
+                    "city": a.get("city"),
+                    "appointmentDate": a.get("appointmentDate"),
+                    "appointmentTime": a.get("appointmentTime"),
+                    "status": a.get("status"),
+                    "channel": a.get("channel"),
+                    "createdAt": a.get("createdAt"),
+                }
+                for a in appts
+            ]},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/healthz")
@@ -684,6 +737,27 @@ def bridge_detail(bridge_id: str):
         s["donorName"] = dname.get(s.get("donorId"))
     b["slots"].sort(key=lambda s: s["slotId"])
     return b
+
+
+@app.get("/calendar/patients")
+def calendar_patients(q: str = ""):
+    """Bridged patients for the calendar tab — optional name/group/city search."""
+    _, patients = load_frames()
+    state = committed_bridges(load_bridge_state())
+    return calendar_plan.list_bridged_patients(patients, state, q=q)
+
+
+@app.get("/calendar/patient/{patient_id}")
+def calendar_patient(patient_id: str):
+    """Transfusion cycle calendar with active + backup donor coverage."""
+    donors, patients = load_frames()
+    state = load_bridge_state()
+    result = calendar_plan.build_patient_calendar(patient_id, patients, donors, state)
+    if result.get("error") == "patient not found":
+        raise HTTPException(status_code=404, detail="patient not found")
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @app.get("/at-risk")

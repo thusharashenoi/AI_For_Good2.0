@@ -1,9 +1,10 @@
 """Tests for eligibility checklist tools and check_eligibility completeness."""
 from shared.agent_tools import AgentTools
+from conftest import DEMO_PHONE
 
 
 def test_get_eligibility_checklist_returns_questions():
-    phone = "+919876502001"
+    phone = DEMO_PHONE
     AgentTools(phone, channel="voice").complete_donor_registration(
         name="Elig Donor", age=30, weight=70, blood_group="O+", area="Madhapur")
     checklist = AgentTools(phone, channel="voice").get_eligibility_checklist()
@@ -14,7 +15,7 @@ def test_get_eligibility_checklist_returns_questions():
 
 
 def test_save_partial_then_check_incomplete():
-    phone = "+919876502002"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Partial Elig", age=30, weight=70, blood_group="A+", area="Gachibowli")
@@ -25,7 +26,7 @@ def test_save_partial_then_check_incomplete():
 
 
 def test_full_eligibility_flow_eligible():
-    phone = "+919876502003"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Full Elig", age=30, weight=70, blood_group="B+", area="Secunderabad")
@@ -41,7 +42,7 @@ def test_full_eligibility_flow_eligible():
 
 
 def test_checklist_in_get_state_during_outreach():
-    phone = "+919876502004"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Outreach Elig", age=30, weight=70, blood_group="O+", area="Madhapur")

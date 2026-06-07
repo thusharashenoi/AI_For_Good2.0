@@ -12,6 +12,9 @@ sys.path.insert(0, ROOT)
 
 import pytest  # noqa: E402
 
+# Single demo phone for all tests — matches DEMO_OUTREACH_PHONE in .env.
+DEMO_PHONE = "+919372875356"
+
 
 @pytest.fixture(autouse=True)
 def _clean_state():

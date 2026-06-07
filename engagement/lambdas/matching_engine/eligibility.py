@@ -22,6 +22,8 @@ def is_eligible_for_request(donor: Dict, request: Dict,
         reasons.append("registration_incomplete")
     if not donor.get("consentGiven"):
         reasons.append("no_consent")
+    if not donor.get("phone"):
+        reasons.append("no_phone")
 
     donor_bg = donor.get("bloodGroup")
     need_bg = request.get("bloodGroup")

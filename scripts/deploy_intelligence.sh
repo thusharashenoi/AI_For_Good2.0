@@ -28,7 +28,7 @@ mkdir -p "${ROOT}/.lambda_pkg"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE"
 cp -r "${ROOT}/.lambda_pkg/"* "$BUNDLE/"
-cp -r raktsetu lambdas "$BUNDLE/"
+cp -r raktsetu lambdas engagement "$BUNDLE/"
 # Strip tests/cache so unzipped bundle stays under Lambda's 250 MB limit.
 find "$BUNDLE" -type d \( -name tests -o -name __pycache__ -o -name test -o -name testing \) -prune -exec rm -rf {} + 2>/dev/null || true
 find "$BUNDLE" -name '*.pyc' -delete 2>/dev/null || true

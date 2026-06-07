@@ -1,6 +1,6 @@
 """Periskope WhatsApp gateway (proxy on your own number, no Meta templates).
 
-Lets RaktSetu send/receive free-form WhatsApp from +919076150904 via Periskope's
+Lets RaktSetu send/receive free-form WhatsApp from +918433775356 via Periskope's
 unofficial API — ideal for the hackathon demo where business-initiated template
 approval would otherwise be required.
 
@@ -29,7 +29,7 @@ def _digits(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
 
 
-DEFAULT_BOT_PHONE = "919076150904"
+DEFAULT_BOT_PHONE = "918433775356"
 
 
 def bot_phone_digits() -> str:

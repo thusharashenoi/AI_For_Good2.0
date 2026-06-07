@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "./api.js";
+import { api, shortId } from "./api.js";
+import ErrorModal, { formatApiError } from "./ErrorModal.jsx";
 import GraphNetwork, { GraphLegend } from "./GraphNetwork.jsx";
 
 const POOL_FILTERS = [
@@ -31,6 +32,172 @@ function filterOverview(overview, filter) {
   return { ...overview, nodes, edges };
 }
 
+const thCls = "text-muted text-[11px] font-semibold uppercase tracking-wide";
+
+const GROUP_COLORS = {
+  "O-": "#e11d48", "O+": "#fb7185", "A-": "#2563eb", "A+": "#60a5fa",
+  "B-": "#d97706", "B+": "#f59e0b", "AB-": "#7c3aed", "AB+": "#a78bfa",
+};
+
+function GroupTag({ g }) {
+  const c = GROUP_COLORS[g] || "#8a8a8a";
+  return (
+    <span className="px-2 py-0.5 rounded-md text-xs font-bold"
+      style={{ background: c + "1a", color: c }}>
+      {g || "?"}
+    </span>
+  );
+}
+
+function roleLabel(role, slotTypeHint) {
+  if (role === "active") return "Active";
+  if (role === "buffer") return "Buffer";
+  if (role === "bridge") return "Member";
+  if (role === "candidate") return slotTypeHint ? `Tentative · ${slotTypeHint}` : "Tentative";
+  return role || "—";
+}
+
+function buildDonorRows(focusGraph) {
+  const edgeByDonor = new Map();
+  for (const e of focusGraph?.edges || []) {
+    edgeByDonor.set(e.to, e);
+  }
+  const members = [];
+  const candidates = [];
+  for (const n of focusGraph?.nodes || []) {
+    if (n.kind !== "donor") continue;
+    const edge = edgeByDonor.get(n.id);
+    const row = {
+      id: n.id,
+      name: n.label,
+      group: n.group,
+      city: n.city,
+      role: n.role,
+      slotId: n.slotId,
+      backupFor: n.backupFor,
+      slotTypeHint: n.slotTypeHint,
+      showRate: n.showRate,
+      score: edge?.score,
+    };
+    if (n.role === "candidate") candidates.push(row);
+    else members.push(row);
+  }
+  candidates.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  members.sort((a, b) => String(a.slotId || "").localeCompare(String(b.slotId || "")));
+  return { members, candidates };
+}
+
+function DonorTable({ title, rows, emptyText }) {
+  return (
+    <div>
+      <h4 className="font-head font-semibold text-ink text-sm mb-2">{title}</h4>
+      {rows.length === 0 ? (
+        <p className="text-xs text-muted italic">{emptyText}</p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line">
+          <table className="w-full text-xs min-w-[280px]">
+            <thead>
+              <tr className={thCls}>
+                <th className="text-left py-2 px-2">Donor</th>
+                <th>Group</th>
+                <th className="text-left">Role</th>
+                <th className="text-right py-2 px-2">Match</th>
+                <th className="text-right py-2 pl-2 pr-3">Show-up</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id} className="border-t border-line">
+                  <td className="py-2 px-2 text-ink font-medium">
+                    {row.name}
+                    {row.city && <span className="block text-muted font-normal">{row.city}</span>}
+                    {row.slotId && (
+                      <span className="block text-muted font-mono text-[10px]">
+                        Slot {row.slotId}{row.backupFor ? ` · backup for ${row.backupFor}` : ""}
+                      </span>
+                    )}
+                  </td>
+                  <td className="text-center"><GroupTag g={row.group} /></td>
+                  <td className="text-muted capitalize">{roleLabel(row.role, row.slotTypeHint)}</td>
+                  <td className="text-right text-ink font-semibold px-2">
+                    {row.score != null ? `${Math.round(row.score * 100)}%` : "—"}
+                  </td>
+                  <td className="text-right text-muted pl-2 pr-3">
+                    {row.showRate != null ? `${Math.round(row.showRate * 100)}%` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FocusDetailPanel({ focusGraph, focusKind }) {
+  const { members, candidates } = useMemo(() => buildDonorRows(focusGraph), [focusGraph]);
+  const patientNode = focusGraph?.nodes?.find((n) => n.kind === "patient");
+
+  const details = [
+    ["Name", focusGraph?.patientName || patientNode?.label],
+    ["Blood group", focusGraph?.bloodGroup || patientNode?.group],
+    ["City", patientNode?.city],
+    focusKind === "bridge"
+      ? ["Bridge ID", focusGraph?.bridgeId]
+      : ["Patient ID", shortId(focusGraph?.patientId)],
+    focusKind === "bridge"
+      ? ["Bridge fill", `${(focusGraph?.active ?? 0) + (focusGraph?.buffer ?? 0)}/${focusGraph?.target ?? 10}`]
+      : ["Status", focusGraph?.reason === "unbridged" ? "Unbridged" : "Patient focus"],
+  ];
+
+  if (focusKind === "bridge") {
+    details.push(
+      ["Active slots", focusGraph?.active],
+      ["Buffer slots", focusGraph?.buffer],
+      ["Vacant slots", focusGraph?.vacant],
+    );
+  } else {
+    details.push(["Tentative donors", candidates.length]);
+  }
+
+  return (
+    <div className="space-y-4 max-h-[520px] overflow-y-auto pr-4">
+      <div>
+        <h4 className="font-head font-semibold text-ink text-sm mb-2">Patient details</h4>
+        <div className="rounded-lg border border-line overflow-hidden">
+          <table className="w-full text-xs">
+            <tbody>
+              {details.map(([label, value]) => (
+                <tr key={label} className="border-t border-line first:border-t-0">
+                  <td className="py-2 pl-3 pr-2 text-muted w-2/5">{label}</td>
+                  <td className="py-2 pl-3 pr-4 text-ink font-medium break-all">
+                    {label === "Blood group" && value ? <GroupTag g={value} /> : (value ?? "—")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <DonorTable
+        title={focusKind === "bridge" ? "Bridge donors" : "Existing bridge donors"}
+        rows={members}
+        emptyText={focusKind === "bridge"
+          ? "No confirmed bridge members yet."
+          : "No bridge formed — patient is unbridged."}
+      />
+
+      <DonorTable
+        title="Top tentative donors"
+        rows={candidates}
+        emptyText="No ranked candidates in the free pool."
+      />
+    </div>
+  );
+}
+
 export default function BloodGraphTab({ selectedBridgeId, onSelectBridge, onClearBridge }) {
   const [overview, setOverview] = useState(null);
   const [focusGraph, setFocusGraph] = useState(null);
@@ -47,7 +214,7 @@ export default function BloodGraphTab({ selectedBridgeId, onSelectBridge, onClea
     try {
       setOverview(await api.graphOverview(8));
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setLoadingOverview(false);
     }
@@ -78,7 +245,7 @@ export default function BloodGraphTab({ selectedBridgeId, onSelectBridge, onClea
       setFocusGraph(data);
       setFocusKind(kind);
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setLoadingFocus(false);
     }
@@ -126,9 +293,7 @@ export default function BloodGraphTab({ selectedBridgeId, onSelectBridge, onClea
 
   return (
     <div className="space-y-6">
-      {error && (
-        <div className="card p-4 border-brand/30 bg-brand-soft text-danger text-sm">{error}</div>
-      )}
+      <ErrorModal message={error} onDismiss={() => setError(null)} />
 
       <section className="card p-5">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
@@ -208,25 +373,15 @@ export default function BloodGraphTab({ selectedBridgeId, onSelectBridge, onClea
         )}
 
         {focusGraph && !focusGraph.error && (
-          <>
-            <div className="flex flex-wrap gap-2 mb-3">
-              <MetaPill label="Patient" value={focusGraph.patientName || selectedPatient?.label} />
-              <MetaPill label="Group" value={focusGraph.bloodGroup} />
-              {focusKind === "bridge" ? (
-                <>
-                  <MetaPill label="Active" value={focusGraph.active} />
-                  <MetaPill label="Buffer" value={focusGraph.buffer} />
-                  <MetaPill label="Vacant" value={focusGraph.vacant} />
-                </>
-              ) : (
-                <MetaPill label="Candidates" value={focusGraph.candidateCount} />
-              )}
+          <div className="grid lg:grid-cols-5 gap-5 items-start">
+            <div className="lg:col-span-3 space-y-3">
+              <GraphLegend compact />
+              <GraphNetwork data={focusGraph} layout="fixed" height="520px" disableZoom />
             </div>
-            <GraphLegend compact />
-            <div className="mt-3">
-              <GraphNetwork data={focusGraph} layout="fixed" height="400px" disableZoom />
+            <div className="lg:col-span-2 rounded-xl border border-line bg-canvas p-4 lg:sticky lg:top-4">
+              <FocusDetailPanel focusGraph={focusGraph} focusKind={focusKind} />
             </div>
-          </>
+          </div>
         )}
       </section>
     </div>

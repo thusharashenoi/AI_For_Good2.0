@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 from . import config, dynamodb_client as db, i18n
 from .agent_tools import TOOL_SCHEMAS, AgentTools, dispatch
 from .branding import BOT_NAME, ORG_TAGLINE
-from .voice_speech import VOICE_SPOKEN_RULES
+from .voice_speech import VOICE_SPOKEN_RULES, INBOUND_VOICE_RULES
 
 logger = logging.getLogger("raktsetu.agent")
 
@@ -76,13 +76,15 @@ Collect through natural conversation in any order — e.g. "My daughter Anjali n
 When missingForPatientRequest is empty, call raise_blood_request (it merges saved context).
 On ok=true: confirm the request is raised (patient name, group, hospital, required-by), say you're reaching out to compatible donors now and will update them when a donor confirms, and share the helpline.
 
-# FLOW D — DONOR SAYS YES TO AN OUTREACH (eligibility quick-check)
-If get_state shows awaitingOutreachReply and the donor agrees to donate:
-1. Call get_eligibility_checklist to see what's still needed and whether they are in cooldown.
-2. Ask remaining health topics conversationally (they may answer several at once) — call save_eligibility_answers after each turn.
-3. When readyToEvaluate is true, call check_eligibility (never with guessed defaults).
-4. If eligible=true: call book_appointment and confirm hospital, date, and time warmly.
-5. If eligible=false or cooldown: thank them honestly and end — no pressure.
+# FLOW D — OUTREACH CALL (you called them about an urgent need)
+The opening states blood is needed at the hospital by the deadline and asks if they can donate before then.
+CONTEXT: Never ask "which day" when blood is due today or tomorrow — ask TIME only. Use slotQuestionSpoken from get_state.
+1. If NO → call decline_outreach immediately (call ends — do not keep talking).
+2. If YES → ask using slotQuestionSpoken (natural speech, one short question).
+3. When they answer → call confirm_appointment_slot with date/time.
+4. Then get_eligibility_checklist → save_eligibility_answers → check_eligibility when ready.
+5. If eligible → call book_appointment (WhatsApp + hangup happen automatically — do not speak after).
+6. If not eligible or cooldown → thank them honestly and end — no pressure.
 
 # FLOW E — EXISTING DONORS
 They can ask to book, see appointments (get_my_appointments), cancel (cancel_appointment — record reason; a replacement search starts automatically), or update.
@@ -119,6 +121,7 @@ VOICE_HUMAN_RULES = """
 # Voice-only prompt: fewer tool round-trips + anti-silence rules.
 VOICE_SYSTEM_PROMPT = (
     VOICE_SPOKEN_RULES
+    + INBOUND_VOICE_RULES
     + VOICE_HUMAN_RULES
     + STRICT_SYSTEM_PROMPT.replace("{channel_note}", VOICE_NOTE).replace("{channel}", "voice")
     .replace(
@@ -141,7 +144,10 @@ VOICE_SYSTEM_PROMPT = (
         "# RETURNING CALLERS\n"
         "If get_state shows isReturningCaller=true, greet by callerFirstName warmly "
         "(e.g. 'Welcome back, Rahul!'). Skip re-registration unless they ask to update. "
-        "If awaitingOutreachReply, they are responding to an urgent request.\n\n"
+        "If urgent donation outreach is active, they are responding to an urgent request.\n\n"
+        "# FLOW A — NEW INBOUND CALLER (voice)\n"
+        "Listen to why they called. Infer donor registration vs patient blood request from natural speech. "
+        "Set user_type when clear. Never sound like an IVR — one warm clarifying question at most.\n\n"
         "# FLOW E — EXISTING DONORS",
     )
     .replace("missingForDonorRegistration", "still missing for donor registration")

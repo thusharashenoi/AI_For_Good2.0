@@ -41,9 +41,9 @@ def send_whatsapp_direct(to: str, body: str, media_url: Optional[str] = None) ->
     """Send via Twilio WhatsApp API (ignores WA_PROVIDER=periskope).
 
     Use for mobilization broadcasts where the sender must be TWILIO_WHATSAPP_NUMBER
-    (e.g. +919076150904) and the recipient is a separate demo/coordinator phone.
+    (e.g. +918433775356) and the recipient is a separate demo/coordinator phone.
     """
-    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+919076150904")
+    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+918433775356")
     record = {"channel": "whatsapp", "to": _wa(to), "from": _wa(from_number),
               "body": body, "mediaUrl": media_url, "at": time.time()}
     if config.LOCAL_MODE:
@@ -68,7 +68,7 @@ def send_whatsapp(to: str, body: str, media_url: Optional[str] = None) -> Dict:
         res = periskope_client.send_message(to, body)
         return {"sid": res.get("response", {}).get("message_id") if isinstance(res.get("response"), dict) else None,
                 "provider": "periskope", "ok": res.get("ok"), "to": to, "body": body}
-    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+919076150904")
+    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+918433775356")
     record = {"channel": "whatsapp", "to": _wa(to), "from": _wa(from_number),
               "body": body, "mediaUrl": media_url, "at": time.time()}
     if config.LOCAL_MODE:
@@ -87,7 +87,7 @@ def send_whatsapp_template(to: str, content_sid: str, variables: Dict[str, str])
 
     Uses Twilio Content API content_sid + content_variables.
     """
-    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+919076150904")
+    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+918433775356")
     record = {"channel": "whatsapp_template", "to": _wa(to), "contentSid": content_sid,
               "variables": variables, "at": time.time()}
     if config.LOCAL_MODE:

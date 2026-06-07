@@ -47,9 +47,34 @@ Resources:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-patients-${Stage}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bridges-${Stage}/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-bloodRequests-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-appointments-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-conversations-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-waitlist-${Stage}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/raktsetu-processedMessages-${Stage}
               - Effect: Allow
                 Action: states:StartExecution
                 Resource: "*"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:raktsetu/*
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:raktsetu-trigger-voice-${Stage}
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                Resource: !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/*
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/raktsetu-scheduler-${Stage}
 
   MatchingEngineFunction:
     Type: AWS::Lambda::Function
@@ -159,9 +184,20 @@ Resources:
         Variables:
           STAGE: !Ref Stage
           AWS_REGION_NAME: !Ref AWS::Region
+          LOCAL_MODE: "0"
+          SECRETS_MANAGER_SECRET_ID: raktsetu/config
           DYNAMODB_TABLE_DONORS: !Sub raktsetu-donors-${Stage}
           DYNAMODB_TABLE_PATIENTS: !Sub raktsetu-patients-${Stage}
           DYNAMODB_TABLE_BRIDGES: !Sub raktsetu-bridges-${Stage}
+          DYNAMODB_TABLE_REQUESTS: !Sub raktsetu-bloodRequests-${Stage}
+          DYNAMODB_TABLE_APPOINTMENTS: !Sub raktsetu-appointments-${Stage}
+          DYNAMODB_TABLE_CONVERSATIONS: !Sub raktsetu-conversations-${Stage}
+          DYNAMODB_TABLE_WAITLIST: !Sub raktsetu-waitlist-${Stage}
+          DYNAMODB_TABLE_PROCESSED_MESSAGES: !Sub raktsetu-processedMessages-${Stage}
+          TRIGGER_VOICE_LAMBDA_ARN: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:raktsetu-trigger-voice-${Stage}
+          DEMO_OUTREACH_PHONE: "+919372875356"
+          OUTREACH_VOICE_ESCALATION_SECONDS: "7"
+          PERISKOPE_LIVE_SENDS: "1"
           CACHE_TTL: "120"
           LIVE_ELIGIBILITY: "1"
           PLANNER_MOBILIZE: !Ref PlannerMobilize

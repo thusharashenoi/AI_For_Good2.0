@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "./api.js";
+import ErrorModal, { formatApiError } from "./ErrorModal.jsx";
 
 const BLOOD_GROUPS = ["O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-"];
 
@@ -38,7 +39,7 @@ export default function EmergencyTab() {
     try {
       setResult(await api.emergencyMatch({ ...form, limit: 15 }));
     } catch (err) {
-      setError(String(err));
+      setError(formatApiError(err));
     } finally {
       setLoading(false);
     }
@@ -48,6 +49,8 @@ export default function EmergencyTab() {
 
   return (
     <div className="space-y-6">
+      <ErrorModal message={error} onDismiss={() => setError(null)} />
+
       <section className="card p-5">
         <h2 className="font-head font-semibold text-ink">Emergency request</h2>
         <p className="text-xs text-muted mt-1 max-w-2xl">
@@ -87,8 +90,6 @@ export default function EmergencyTab() {
             </button>
           </div>
         </form>
-
-        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
       </section>
 
       {result && (

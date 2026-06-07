@@ -6,11 +6,9 @@ LOCAL_MODE=0 to actually hit the services.
 
 Usage:
     LOCAL_MODE=0 python scripts/test_connectivity.py
-    LOCAL_MODE=0 python scripts/test_connectivity.py --send-whatsapp +91XXXXXXXXXX
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -70,17 +68,7 @@ def check_twilio():
     return True
 
 
-def send_test_whatsapp(to: str):
-    from shared import twilio_client
-    res = twilio_client.send_whatsapp(to, "🩸 RaktSetu connectivity test — Veeru here. Reply Hi to start!")
-    print(f"{OK} WhatsApp sent to {to}: sid={res.get('sid')}")
-
-
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--send-whatsapp", metavar="+91...", help="Send a real test WhatsApp.")
-    args = parser.parse_args()
-
     if config.LOCAL_MODE:
         print(f"{WARN} LOCAL_MODE=1 — set LOCAL_MODE=0 to test live services. Exiting.")
         return
@@ -92,12 +80,6 @@ def main():
         except Exception as exc:
             print(f"{FAIL} {name} check errored: {exc}")
             results.append(False)
-
-    if args.send_whatsapp:
-        try:
-            send_test_whatsapp(args.send_whatsapp)
-        except Exception as exc:
-            print(f"{FAIL} WhatsApp send failed: {exc}")
 
     print("\nSummary:", "all good 🩸" if all(results) else "some checks failed — see above.")
 

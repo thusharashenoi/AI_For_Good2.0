@@ -1,4 +1,5 @@
 from lambdas.matching_engine import scoring, eligibility, graph
+from conftest import DEMO_PHONE
 
 
 REQUEST = {
@@ -9,7 +10,7 @@ REQUEST = {
 
 def _donor(donor_id, bg, **kw):
     base = {"donorId": donor_id, "bloodGroup": bg, "name": f"D {donor_id}",
-            "phone": f"+9100000{donor_id}", "registrationStatus": "complete",
+            "phone": DEMO_PHONE, "registrationStatus": "complete",
             "consentGiven": True, "medicalFlags": {}, "lastDonationDate": None}
     base.update(kw)
     return base

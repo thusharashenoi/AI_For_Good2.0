@@ -17,7 +17,7 @@ logger = logging.getLogger("raktsetu.twilio_poll")
 
 
 def _bot_wa() -> str:
-    num = config.get("TWILIO_WHATSAPP_NUMBER") or "whatsapp:+919076150904"
+    num = config.get("TWILIO_WHATSAPP_NUMBER") or "whatsapp:+918433775356"
     if num.startswith("whatsapp:"):
         return num
     if num.startswith("+"):

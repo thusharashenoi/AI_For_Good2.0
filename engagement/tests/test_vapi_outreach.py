@@ -3,10 +3,11 @@ from shared import dynamodb_client as db, scheduler
 from shared.agent_tools import AgentTools
 from shared import vapi_context
 from lambdas.vapi_tools import handler as vapi_tools
+from conftest import DEMO_PHONE
 
 
 def test_returning_donor_greeting():
-    phone = "+919876501001"
+    phone = DEMO_PHONE
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Rahul Kumar", age=30, weight=70, blood_group="O+", area="Madhapur")
@@ -16,13 +17,13 @@ def test_returning_donor_greeting():
 
 
 def test_new_caller_greeting():
-    phone = "+919876501002"
+    phone = DEMO_PHONE
     greeting = vapi_context.build_voice_greeting(phone)
-    assert "blood donor" in greeting.lower()
+    assert "register as a donor" in greeting.lower() or "blood donor" in greeting.lower()
 
 
 def test_get_state_returning_caller():
-    phone = "+919876501003"
+    phone = DEMO_PHONE
     AgentTools(phone, channel="voice").complete_donor_registration(
         name="Priya Sharma", age=28, weight=65, blood_group="A+", area="Gachibowli")
     state = AgentTools(phone, channel="voice").get_state()
@@ -32,7 +33,7 @@ def test_get_state_returning_caller():
 
 
 def test_assistant_request_returns_overrides():
-    phone = "+919876501004"
+    phone = DEMO_PHONE
     AgentTools(phone, channel="voice").complete_donor_registration(
         name="Arjun Reddy", age=32, weight=72, blood_group="B+", area="Secunderabad")
     event = {"body": '{"message":{"type":"assistant-request","call":{"customer":{"number":"'
@@ -46,14 +47,14 @@ def test_assistant_request_returns_overrides():
 
 
 def test_registration_tool_schedules_end_call(monkeypatch):
-    phone = "+919876501005"
+    phone = DEMO_PHONE
     ended = []
 
-    def fake_end(message, **kw):
-        ended.append({"message": message, **kw})
+    def fake_hangup(message, goodbye, **kw):
+        ended.append({"message": goodbye, "goodbye": goodbye, **kw})
         return {"ok": True}
 
-    monkeypatch.setattr("shared.vapi_client.end_call", fake_end)
+    monkeypatch.setattr("shared.vapi_client.hangup_after_goodbye", fake_hangup)
     event = {
         "body": __import__("json").dumps({
             "message": {
@@ -86,20 +87,21 @@ def test_registration_tool_schedules_end_call(monkeypatch):
 
 
 def test_book_appointment_schedules_end_call(monkeypatch):
-    phone = "+919876501006"
+    phone = DEMO_PHONE
     ended = []
 
-    def fake_end(message, **kw):
-        ended.append(kw)
+    def fake_hangup(message, goodbye, **kw):
+        ended.append({"goodbye": goodbye, **kw})
         return {"ok": True}
 
-    monkeypatch.setattr("shared.vapi_client.end_call", fake_end)
+    monkeypatch.setattr("shared.vapi_client.hangup_after_goodbye", fake_hangup)
+    monkeypatch.setattr("shared.periskope_client.send_message", lambda *a, **k: {"ok": True})
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Appt End Test", age=30, weight=70, blood_group="A+", area="Madhapur")
     req_id = db.new_id()
     db.save_request({
-        "requestId": req_id, "patientId": db.new_id(), "patientPhone": "+919800000001",
+        "requestId": req_id, "patientId": db.new_id(), "patientPhone": DEMO_PHONE,
         "patientName": "Baby K", "bloodGroup": "A+", "hospital": "NIAT Hospital",
         "city": "Bangalore", "status": "open", "requiredBy": "2026-06-10",
     })
@@ -116,34 +118,42 @@ def test_book_appointment_schedules_end_call(monkeypatch):
                     "customer": {"number": phone},
                     "monitor": {"controlUrl": "https://example.com/control"},
                 },
-                "toolCallList": [{
-                    "id": "tc-appt",
-                    "name": "book_appointment",
-                    "arguments": {"date": "2026-06-10", "time": "10:00 AM"},
-                }],
+                "toolCallList": [
+                    {
+                        "id": "tc-confirm",
+                        "name": "confirm_appointment_slot",
+                        "arguments": {"date": "2026-06-10", "time": "10:00 AM"},
+                    },
+                    {
+                        "id": "tc-appt",
+                        "name": "book_appointment",
+                        "arguments": {},
+                    },
+                ],
             },
         }),
     }
     resp = vapi_tools.handler(event)
     results = __import__("json").loads(resp["body"])["results"]
-    assert "Thank you" in results[0]["message"]
-    assert "NIAT Hospital" in results[0]["message"]
+    book_entry = results[-1]
+    assert "lifesaver" in book_entry["message"].lower()
+    assert "NIAT Hospital" in book_entry["message"]
     assert len(ended) == 1
     assert "Namaste" in ended[0]["goodbye"]
 
 
 def test_outreach_greeting_when_awaiting_reply():
-    phone = "+919876501020"
+    phone = DEMO_PHONE
     AgentTools(phone, channel="voice").complete_donor_registration(
         name="Outreach Test", age=30, weight=70, blood_group="A+", area="Madhapur")
     vapi_context.ensure_outreach_primed(phone, "req-test-123")
     greeting = vapi_context.build_voice_greeting(phone)
-    assert "urgently needs" in greeting.lower() or "can you donate" in greeting.lower()
+    assert "would you be available to donate" in greeting.lower() or "can you donate" in greeting.lower()
     assert "blood donor" not in greeting.lower() or "patient or guardian" not in greeting.lower()
 
 
 def test_outreach_overrides_from_variables():
-    phone = "+919876501021"
+    phone = DEMO_PHONE
     overrides = vapi_context.assistant_overrides(
         phone,
         variables={
@@ -168,12 +178,12 @@ def test_get_state_outreach_voice_summary():
 
     summary = format_tool_result_for_voice("get_state", {"awaitingOutreachReply": True, "outreachMode": True})
     assert "Outreach call" in summary
-    assert "register" in summary.lower()
+    assert "confirm_appointment_slot" in summary.lower()
 
 
 def test_inline_outreach_after_patient_request():
-    donor_phone = "+919876501010"
-    patient_phone = "+919876501011"
+    donor_phone = DEMO_PHONE
+    patient_phone = DEMO_PHONE
     AgentTools(donor_phone, channel="voice").complete_donor_registration(
         name="Outreach Donor", age=30, weight=70, blood_group="A+", area="Madhapur")
     pt = AgentTools(patient_phone, channel="whatsapp")

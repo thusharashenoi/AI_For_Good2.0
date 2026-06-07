@@ -27,7 +27,7 @@ def _digits(phone: str) -> str:
 
 
 def _bot_digits() -> str:
-    raw = config.get("TWILIO_WHATSAPP_NUMBER") or config.get("PERISKOPE_PHONE") or "919076150904"
+    raw = config.get("TWILIO_WHATSAPP_NUMBER") or config.get("PERISKOPE_PHONE") or "918433775356"
     return _digits(raw)
 
 

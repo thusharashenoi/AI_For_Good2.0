@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")/.."
-export LOCAL_MODE=1 AGENT_FORCE_BEDROCK=1 PERISKOPE_LIVE_SENDS=1 VAPI_LIVE_CALLS=1
-exec /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 scripts/local_server.py >> /tmp/raktsetu-server.log 2>&1
+# Start engagement server on :4000 with live DynamoDB dev tables (matches Admin API).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT/engagement"
+eval "$("$ROOT/scripts/load_env.sh")"
+export VAPI_SERVER_URL="${VAPI_SERVER_URL:-http://127.0.0.1:4000}"
+exec "$ROOT/.venv/bin/python" scripts/local_server.py

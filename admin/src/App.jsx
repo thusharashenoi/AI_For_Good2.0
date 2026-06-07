@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, shortId } from "./api.js";
 import BloodGraphTab from "./BloodGraphTab.jsx";
+import CalendarTab from "./CalendarTab.jsx";
 import EmergencyTab from "./EmergencyTab.jsx";
+import ErrorModal, { formatApiError } from "./ErrorModal.jsx";
+import bwLongLogo from "./assets/bw-long-logo.png";
 
 // Blood-group colours tuned for a light background.
 const GROUP_COLORS = {
@@ -66,7 +69,7 @@ function BridgeDrawer({ patient, onClose }) {
       });
       return;
     }
-    api.candidates(patient.patientId, 12).then(setData).catch((e) => setErr(String(e)));
+    api.candidates(patient.patientId, 12).then(setData).catch((e) => setErr(formatApiError(e)));
   }, [patient]);
 
   async function handleBroadcast() {
@@ -75,8 +78,48 @@ function BridgeDrawer({ patient, onClose }) {
     try {
       const res = await api.broadcastBridge(patient.bridgeId);
       setBroadcast(res);
+      if (res.ok && !res.voiceEscalationScheduled) {
+        const detail = res.voiceEscalationError || "engagement server may be down on :4000";
+        setErr(`WhatsApp was sent, but the follow-up voice call was not scheduled (${detail}).`);
+        return;
+      }
+      if (res.ok && res.voiceEscalationScheduled) {
+        const bridgeId = patient.bridgeId;
+        const delaySec = res.voiceEscalationDelaySeconds ?? res.callDelaySec ?? 7;
+
+        const pollVoiceStatus = async (attempt = 0) => {
+          try {
+            const status = await api.broadcastOutreachStatus(bridgeId);
+            const result = status.escalationCallResult || {};
+            const placed = (
+              status.voiceOutreachPlaced
+              || status.escalationCallPlaced
+              || status.voiceCallId
+              || result.ok
+              || result.voicePlaced
+            );
+            if (placed) return;
+            if (result.ok === false && result.reason) {
+              const hint = result.reason === "missing_context"
+                ? "Engagement server was not using live DynamoDB — restart: cd engagement && bash scripts/run_server.sh"
+                : result.reason;
+              setErr(`WhatsApp was sent, but the voice call failed (${hint}).`);
+              return;
+            }
+            if (attempt < 10) {
+              window.setTimeout(() => pollVoiceStatus(attempt + 1), 3000);
+              return;
+            }
+            setErr("WhatsApp was sent, but no voice call confirmation yet. If your phone rang, you can ignore this.");
+          } catch {
+            /* ignore poll errors */
+          }
+        };
+
+        window.setTimeout(() => pollVoiceStatus(0), (delaySec + 5) * 1000);
+      }
     } catch (e) {
-      setErr(String(e));
+      setErr(formatApiError(e));
     } finally {
       setBroadcasting(false);
     }
@@ -84,7 +127,15 @@ function BridgeDrawer({ patient, onClose }) {
 
   if (!patient) return null;
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-ink/30 backdrop-blur-sm" onClick={onClose}>
+    <>
+      {err && (
+        <ErrorModal
+          message={err}
+          title={err.startsWith("WhatsApp was sent") ? "Partial broadcast failure" : "Bridge error"}
+          onDismiss={() => setErr(null)}
+        />
+      )}
+      <div className="fixed inset-0 z-50 flex justify-end bg-ink/30 backdrop-blur-sm" onClick={onClose}>
       <div className="w-full max-w-md h-full bg-surface border-l border-line p-6 overflow-y-auto shadow-2xl"
         onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between gap-3">
@@ -114,7 +165,6 @@ function BridgeDrawer({ patient, onClose }) {
             If no reply in {broadcast.callDelaySec}s, a voice call will follow to the same number.
           </div>
         )}
-        {err && <div className="mt-4 text-danger text-sm">{err}</div>}
         {!data && !err && (
           <div className="mt-6 text-muted">
             {patient.forming ? "Forming bridge…" : "Ranking donors…"}
@@ -153,6 +203,7 @@ function BridgeDrawer({ patient, onClose }) {
         </p>
       </div>
     </div>
+    </>
   );
 }
 
@@ -186,6 +237,8 @@ export default function App() {
   const [formingPatientId, setFormingPatientId] = useState(null);
   const [tab, setTab] = useState("ops");
   const [graphBridgeId, setGraphBridgeId] = useState(null);
+  const [deletingRequestId, setDeletingRequestId] = useState(null);
+  const [deletingAppointmentId, setDeletingAppointmentId] = useState(null);
 
   function openBridgeGraph(bridgeId) {
     setGraphBridgeId(bridgeId);
@@ -203,14 +256,37 @@ export default function App() {
       setRequests(req);
       setAppointments(d.appointments);
     } catch (e) {
-      const msg = String(e);
-      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
-        setError("Cannot reach Admin API on :8000 — start it with: .venv/bin/python -m scripts.run_admin_api");
-      } else {
-        setError(msg);
-      }
+      setError(formatApiError(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleDeleteRequest(requestId) {
+    if (deletingRequestId) return;
+    setDeletingRequestId(requestId);
+    setError(null);
+    try {
+      await api.deleteRequest(requestId);
+      await refresh();
+    } catch (e) {
+      setError(formatApiError(e));
+    } finally {
+      setDeletingRequestId(null);
+    }
+  }
+
+  async function handleDeleteAppointment(appointmentId) {
+    if (deletingAppointmentId) return;
+    setDeletingAppointmentId(appointmentId);
+    setError(null);
+    try {
+      await api.deleteAppointment(appointmentId);
+      await refresh();
+    } catch (e) {
+      setError(formatApiError(e));
+    } finally {
+      setDeletingAppointmentId(null);
     }
   }
 
@@ -236,7 +312,7 @@ export default function App() {
       refresh();
     } catch (e) {
       setSelected(null);
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setFormingPatientId(null);
     }
@@ -255,35 +331,18 @@ export default function App() {
     <div className="min-h-full text-body">
       <header className="border-b border-line bg-surface/70 backdrop-blur sticky top-0 z-40">
         <div className="px-8 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl bg-brand grid place-items-center text-white shadow-card">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden>
-                <path d="M12 2s7 7.6 7 12.2A7 7 0 1 1 5 14.2C5 9.6 12 2 12 2z" />
-              </svg>
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-lg font-head font-bold text-ink leading-tight">
-                  Blood Warriors <span className="text-brand">·</span> Bridge Intelligence
-                </h1>
-                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md bg-brand-soft text-brand border border-brand/20">
-                  Extension
-                </span>
-              </div>
-              <p className="text-xs text-muted">
-                Coordinator tools for{" "}
-                <a href="https://www.bloodwarriors.in/home" target="_blank" rel="noreferrer"
-                  className="text-brand hover:underline font-medium">
-                  bloodwarriors.in
-                </a>
-                {" "}· Blood Graph &amp; bridge planning
-              </p>
-            </div>
+          <div className="flex items-center gap-3 min-w-0">
+            <img
+              src={bwLongLogo}
+              alt="Blood Warriors"
+              className="h-9 w-auto max-w-[min(220px,42vw)] object-contain object-left shrink-0"
+            />
           </div>
           <div className="flex items-center gap-3">
             <div className="flex rounded-xl border border-line bg-canvas p-1">
               {[
                 ["ops", "Operations"],
+                ["calendar", "Calendar"],
                 ["graph", "Blood Graph"],
                 ["emergency", "Emergency"],
               ].map(([id, label]) => (
@@ -304,16 +363,7 @@ export default function App() {
       </header>
 
       <main className="px-8 py-6 pb-16 space-y-6 max-w-[1400px] mx-auto">
-        {error && tab === "ops" && (
-          <div className="card p-4 border-brand/30 bg-brand-soft text-danger text-sm">
-            {error}
-            {!error.includes("Cannot reach") && (
-              <span className="block mt-1 text-muted">
-                Restart the API: <code className="font-mono">.venv/bin/python -m scripts.run_admin_api</code>
-              </span>
-            )}
-          </div>
-        )}
+        <ErrorModal message={error} onDismiss={() => setError(null)} />
 
         {tab === "graph" ? (
           <BloodGraphTab
@@ -321,6 +371,8 @@ export default function App() {
             onSelectBridge={setGraphBridgeId}
             onClearBridge={() => setGraphBridgeId(null)}
           />
+        ) : tab === "calendar" ? (
+          <CalendarTab />
         ) : tab === "emergency" ? (
           <EmergencyTab />
         ) : (
@@ -405,16 +457,27 @@ export default function App() {
             </thead>
             <tbody>
               {(requests?.requests || []).map((r) => (
-                <tr key={r.requestId} className="border-t border-line">
+                <tr key={r.requestId} className="border-t border-line group">
                   <td className="py-2.5 text-ink font-medium">{r.patientName || shortId(r.patientId)}</td>
                   <td className="text-center"><GroupTag g={r.bloodGroup} /></td>
                   <td className="text-muted">{r.hospital}{r.city ? ` · ${r.city}` : ""}</td>
                   <td className="text-right text-muted">{r.requiredBy || "—"}</td>
                   <td className="text-center text-xs uppercase">{r.urgencyLevel || "—"}</td>
+                  <td className="py-2.5 pl-2 text-right align-middle w-12">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteRequest(r.requestId)}
+                      disabled={deletingRequestId === r.requestId}
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] text-muted/35 hover:text-danger/70 transition-all disabled:opacity-30"
+                      title="Delete request"
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
               {requests && requests.requests.length === 0 && (
-                <tr><td colSpan="5" className="py-4 text-center text-muted">No open requests</td></tr>
+                <tr><td colSpan="6" className="py-4 text-center text-muted">No open requests</td></tr>
               )}
             </tbody>
           </table>
@@ -436,7 +499,7 @@ export default function App() {
             </thead>
             <tbody>
               {(appointments?.appointments || []).map((a) => (
-                <tr key={a.appointmentId} className="border-t border-line">
+                <tr key={a.appointmentId} className="border-t border-line group">
                   <td className="py-2.5 text-ink font-medium">
                     {a.donorName || shortId(a.donorPhone)}
                     {a.donorPhone && (
@@ -452,11 +515,22 @@ export default function App() {
                   </td>
                   <td className="text-center text-xs uppercase">{a.channel || "—"}</td>
                   <td className="text-muted font-mono text-[11px]">{a.bridgeId || "—"}</td>
+                  <td className="py-2.5 pl-2 text-right align-middle w-12">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteAppointment(a.appointmentId)}
+                      disabled={deletingAppointmentId === a.appointmentId}
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] text-muted/35 hover:text-danger/70 transition-all disabled:opacity-30"
+                      title="Delete appointment"
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
               {appointments && appointments.appointments.length === 0 && (
-                <tr><td colSpan="7" className="py-4 text-center text-muted">
-                  No appointments yet — broadcast a bridge and complete YES + health check on WhatsApp.
+                <tr><td colSpan="8" className="py-4 text-center text-muted">
+                  No appointments yet — complete a voice or WhatsApp booking, then refresh.
                 </td></tr>
               )}
             </tbody>
