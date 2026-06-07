@@ -55,25 +55,48 @@ def _parse_args(raw) -> dict:
     return {}
 
 
-def _tool_calls(message: dict) -> list:
-    """Normalize Vapi/Gemini tool-call payloads (arguments vs parameters)."""
-    calls = list(message.get("toolCallList") or [])
-    if calls:
-        out = []
-        for call in calls:
-            args = call.get("arguments")
-            if args is None:
-                args = call.get("parameters")
-            out.append({"id": call.get("id"), "name": call.get("name"), "arguments": args})
-        return out
+def _normalize_tool_call(call: dict) -> dict:
+    """Normalize Vapi tool-call shapes (flat, Anthropic function.*, parameters)."""
+    fn = call.get("function") or {}
+    name = call.get("name") or call.get("toolName") or fn.get("name")
+    args = call.get("arguments")
+    if args is None:
+        args = call.get("parameters")
+    if args is None:
+        args = fn.get("arguments") or fn.get("parameters")
+    return {"id": call.get("id"), "name": name, "arguments": args}
 
-    out = []
+
+def _tool_calls(message: dict) -> list:
+    """Normalize Vapi/Gemini/Anthropic tool-call payloads."""
+    by_id: dict = {}
     for item in message.get("toolWithToolCallList") or []:
         tc = item.get("toolCall") or {}
+        cid = tc.get("id")
+        if not cid:
+            continue
         fn = tc.get("function") or {}
-        name = fn.get("name") or item.get("name")
-        args = fn.get("arguments") or fn.get("parameters") or tc.get("parameters")
-        out.append({"id": tc.get("id"), "name": name, "arguments": args})
+        by_id[cid] = _normalize_tool_call({
+            "id": cid,
+            "name": fn.get("name") or item.get("name"),
+            "function": fn,
+            "arguments": fn.get("arguments") or fn.get("parameters") or tc.get("parameters"),
+        })
+
+    out = []
+    raw_calls = list(message.get("toolCallList") or [])
+    if not raw_calls and by_id:
+        raw_calls = list(by_id.values())
+
+    for call in raw_calls:
+        normalized = _normalize_tool_call(call)
+        cid = normalized.get("id")
+        if not normalized.get("name") and cid and cid in by_id:
+            normalized = by_id[cid]
+        if normalized.get("id") and normalized.get("name"):
+            out.append(normalized)
+        else:
+            logger.warning("Skipping malformed tool call: %s", call)
     return out
 
 
@@ -90,29 +113,12 @@ def _registration_goodbye(result: dict, donor_name: str) -> str:
     )
 
 
-def _appointment_goodbye(result: dict, donor_name: str) -> str:
-    from shared.datetime_utils import format_spoken
-
-    name = (donor_name or "friend").split(" ")[0]
-    hospital = result.get("hospital") or "the hospital"
-    when = format_spoken(result.get("date") or "", result.get("time") or "10:00 AM")
-    return sanitize_for_speech(
-        f"Thank you so much {name}. Your donation is confirmed at {hospital}, {when}. "
-        "We will send you the details on WhatsApp. Namaste."
-    )
-
-
 def _finish_call(message: dict, goodbye: str, entry: dict) -> None:
-    """Hang up after goodbye — speak via live control when available."""
-    ctrl = vapi_client.resolve_control_url(message)
-    if ctrl:
-        entry["result"] = "Done."
-        entry["message"] = goodbye
-        vapi_client.end_call(message, delay_seconds=12.0, goodbye=goodbye)
-    else:
-        entry["result"] = goodbye
-        entry["message"] = goodbye
-        vapi_client.end_call(message, delay_seconds=14.0)
+    """Speak goodbye once via live control, then hang up before returning to Vapi."""
+    entry["message"] = goodbye
+    entry["result"] = "Do not speak. Goodbye was delivered and the call is ending."
+    hangup = vapi_client.hangup_after_goodbye(message, goodbye)
+    logger.info("hangup_after_goodbye result=%s call=%s", hangup, vapi_client.call_id(message))
 
 
 def _call_variables(message: dict) -> dict:
@@ -152,8 +158,13 @@ def handler(event, context=None):
         phone = vapi_client.caller_phone(message)
         call_id = vapi_client.call_id(message)
         if phone:
-            from shared.outreach import send_post_call_whatsapp
-            result = send_post_call_whatsapp(phone, call_id)
+            from shared import dynamodb_client as db
+            from shared.outreach import send_appointment_confirmation_whatsapp, send_post_call_whatsapp
+            conv = db.get_conversation(phone) or {}
+            if conv.get("activeAppointmentId"):
+                result = send_appointment_confirmation_whatsapp(phone)
+            else:
+                result = send_post_call_whatsapp(phone, call_id)
             logger.info("end-of-call-report phone=%s result=%s", phone, result)
         return _resp({})
 
@@ -186,12 +197,16 @@ def handler(event, context=None):
                 _finish_call(message, goodbye, entry)
             elif name == "book_appointment" and result.get("ok"):
                 from shared import dynamodb_client as db
-                from shared.outreach import send_appointment_confirmation_whatsapp
+                from shared.voice_booking import finalize_voice_booking
                 donor = db.get_donor_by_phone(phone) or {}
-                goodbye = _appointment_goodbye(result, donor.get("name") or "")
-                wa = send_appointment_confirmation_whatsapp(
-                    phone, result.get("appointmentId"))
-                logger.info("book_appointment WhatsApp phone=%s result=%s", phone, wa)
+                finalize_voice_booking(
+                    message, entry, phone, result, donor.get("name") or "")
+            elif name == "decline_outreach" and result.get("ok"):
+                from shared import dynamodb_client as db
+                donor = db.get_donor_by_phone(phone) or {}
+                name_part = (donor.get("name") or "friend").split(" ")[0]
+                goodbye = sanitize_for_speech(
+                    f"Thank you {name_part}. That is completely fine. Take care. Namaste.")
                 _finish_call(message, goodbye, entry)
             results.append(entry)
             logger.info("vapi tool %s ok phone=%s", name, phone)

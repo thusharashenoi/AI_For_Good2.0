@@ -116,12 +116,63 @@ def resolve_control_url(message: Dict) -> Optional[str]:
     return None
 
 
+def hangup_after_goodbye(message: Dict, goodbye: str,
+                         delay_after_speak_seconds: Optional[float] = None) -> Dict:
+    """Speak goodbye via live call control, wait briefly, then end the call (blocking)."""
+    import time
+
+    import requests
+
+    cid = call_id(message)
+    ctrl = resolve_control_url(message)
+    if not cid and not ctrl:
+        logger.warning("hangup_after_goodbye: no call id or control URL")
+        return {"ok": False, "error": "no call id"}
+
+    delay = float(
+        delay_after_speak_seconds
+        if delay_after_speak_seconds is not None
+        else config.get("VAPI_HANGUP_DELAY_SECONDS") or 2.0
+    )
+
+    try:
+        if ctrl:
+            say = requests.post(
+                ctrl, json={"type": "say", "content": goodbye}, timeout=15)
+            logger.info("control say status=%s call=%s", say.status_code, cid)
+            time.sleep(delay)
+            end = requests.post(ctrl, json={"type": "end-call"}, timeout=15)
+            logger.info(
+                "control end-call status=%s call=%s body=%s",
+                end.status_code, cid, (end.text or "")[:120],
+            )
+            if end.status_code < 300:
+                return {"ok": True, "method": "controlUrl", "callId": cid}
+
+        if cid and _call_live():
+            if not ctrl:
+                time.sleep(delay)
+            resp = requests.delete(
+                f"{API_BASE}/call/{cid}", headers=_headers(), timeout=15)
+            logger.info("DELETE call status=%s call=%s", resp.status_code, cid)
+            return {"ok": resp.status_code < 300, "method": "delete", "callId": cid}
+    except Exception as exc:
+        logger.exception("hangup_after_goodbye failed call=%s: %s", cid, exc)
+    return {"ok": False, "callId": cid}
+
+
 def end_call(message: Dict, *, delay_seconds: float = 4.0,
              goodbye: Optional[str] = None) -> Dict:
-    """End an active Vapi call after optional goodbye (server-side, reliable).
+    """End call after optional goodbye (async fallback — prefer hangup_after_goodbye)."""
+    if goodbye:
+        import threading
+        threading.Thread(
+            target=hangup_after_goodbye,
+            args=(message, goodbye),
+            daemon=False,
+        ).start()
+        return {"ok": True, "callId": call_id(message), "scheduledEndSeconds": delay_seconds}
 
-    Uses Live Call Control when controlUrl is present; otherwise DELETE /call/:id.
-    """
     import threading
     import time
 
@@ -134,25 +185,14 @@ def end_call(message: Dict, *, delay_seconds: float = 4.0,
         try:
             import requests
 
+            if delay_seconds:
+                time.sleep(delay_seconds)
             if ctrl:
-                if goodbye:
-                    requests.post(ctrl, json={"type": "say", "content": goodbye}, timeout=10)
-                    pause = max(5.0, min(delay_seconds, 14.0))
-                    time.sleep(pause)
-                elif delay_seconds:
-                    time.sleep(delay_seconds)
                 resp = requests.post(ctrl, json={"type": "end-call"}, timeout=10)
                 if resp.status_code < 300:
-                    logger.info("Vapi end-call via controlUrl ok call=%s", cid)
                     return
             if cid and _call_live():
-                if goodbye and not ctrl:
-                    time.sleep(max(delay_seconds, 8.0))
-                resp = requests.delete(f"{API_BASE}/call/{cid}", headers=_headers(), timeout=10)
-                if resp.status_code < 300:
-                    logger.info("Vapi DELETE call ok call=%s", cid)
-                else:
-                    logger.warning("Vapi DELETE call %s: %s", resp.status_code, resp.text[:200])
+                requests.delete(f"{API_BASE}/call/{cid}", headers=_headers(), timeout=10)
         except Exception as exc:
             logger.exception("end_call failed: %s", exc)
 

@@ -3,12 +3,9 @@ from __future__ import annotations
 
 from . import config
 from .branding import BOT_NAME, ORG_SPOKEN
-from .voice_speech import sanitize_for_speech
+from .voice_speech import sanitize_for_speech, build_inbound_greeting
 
-VAPI_FIRST_MESSAGE = sanitize_for_speech(
-    f"Namaste! I'm {BOT_NAME} from {ORG_SPOKEN}. "
-    "Are you a blood donor, or a patient or guardian who needs blood?"
-)
+VAPI_FIRST_MESSAGE = build_inbound_greeting()
 
 # set_state runs in background so Tara keeps talking while we persist via ngrok.
 _ASYNC_TOOLS = frozenset({"set_state"})
@@ -133,8 +130,7 @@ def build_assistant_payload(server_url: str, name: str, system_prompt: str, tool
         "serverMessages": ["tool-calls", "end-of-call-report", "status-update"],
         "endCallFunctionEnabled": True,
         "endCallMessage": sanitize_for_speech(
-            f"Thank you for registering with Blood Warriors. "
-            "We will contact you when a patient needs your blood group. Namaste."
+            f"Thank you for calling {ORG_SPOKEN}. Namaste."
         ),
         "backgroundDenoisingEnabled": False,
         **build_speaking_plans(),

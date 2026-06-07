@@ -28,21 +28,131 @@ def appt_datetime(date_str: Optional[str], time_str: str = "10:00 AM") -> Option
 
 
 def format_display(date_iso: str, time_str: str = "10:00 AM") -> Tuple[str, str]:
-    """Human-friendly date + time for WhatsApp."""
+    """Human-friendly date + time for WhatsApp (written form)."""
     dt = appt_datetime(date_iso, time_str)
     if not dt:
         return date_iso or "-", time_str or "-"
-    return dt.strftime("%A, %d %B %Y"), time_str
+    return dt.strftime("%A, %d %B %Y"), dt.strftime("%I:%M %p").lstrip("0")
+
+
+def speak_time(time_str: str = "10:00 AM") -> str:
+    """TTS-safe time without AM/PM letter sequences (avoids 'ay em' / garbled acronyms)."""
+    raw = (time_str or "10:00 AM").strip()
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+        try:
+            t = datetime.strptime(raw.upper(), fmt.upper() if "%p" in fmt else fmt)
+            break
+        except ValueError:
+            try:
+                t = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    else:
+        return raw.replace(":", " ").replace("AM", "in the morning").replace("PM", "in the afternoon")
+
+    hour24 = t.hour
+    minute = t.minute
+    h12 = hour24 % 12 or 12
+    if hour24 < 12:
+        period = "in the morning"
+    elif hour24 < 17:
+        period = "in the afternoon"
+    else:
+        period = "in the evening"
+    if minute == 0:
+        return f"{h12} {period}"
+    if minute == 30:
+        return f"{h12} thirty {period}"
+    if minute == 15:
+        return f"{h12} fifteen {period}"
+    if minute == 45:
+        return f"{h12} forty five {period}"
+    return f"{h12} {minute} {period}"
+
+
+def normalize_due_date(required_by: Optional[str],
+                       reference: Optional[datetime] = None) -> Optional[str]:
+    """Parse required-by into YYYY-MM-DD when possible."""
+    import re
+
+    if not required_by:
+        return None
+    raw = str(required_by).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return raw
+    from .bedrock_client import parse_date
+    return parse_date(raw, reference=reference or now_local())
+
+
+def format_date_spoken(date_iso: Optional[str]) -> str:
+    """Spoken calendar day for TTS."""
+    if not date_iso:
+        return "soon"
+    dt = appt_datetime(date_iso, "12:00 PM")
+    if not dt:
+        return date_iso
+    now = now_local()
+    if dt.date() == now.date():
+        return "today"
+    if dt.date() == (now + timedelta(days=1)).date():
+        return "tomorrow"
+    return dt.strftime("%A, %d %B")
+
+
+def format_blood_due_spoken(required_by: Optional[str]) -> str:
+    """When the patient needs blood — for voice."""
+    due_iso = normalize_due_date(required_by)
+    if due_iso:
+        return format_date_spoken(due_iso)
+    raw = (required_by or "soon").strip()
+    return raw.replace("_", " ")
+
+
+def format_blood_due_relative(required_by: Optional[str]) -> str:
+    """Spoken relative deadline e.g. 'tomorrow', 'in 3 days'."""
+    due_iso = normalize_due_date(required_by)
+    if not due_iso:
+        spoken = format_blood_due_spoken(required_by)
+        if spoken == "tomorrow":
+            return "tomorrow"
+        if spoken == "today":
+            return "today"
+        return spoken
+    now = now_local()
+    due_dt = appt_datetime(due_iso, "12:00 PM")
+    if not due_dt:
+        return format_blood_due_spoken(required_by)
+    days = (due_dt.date() - now.date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "tomorrow"
+    if days == 2:
+        return "in two days"
+    return f"in {days} days"
+
+
+def format_availability_window(required_by: Optional[str]) -> str:
+    """Spoken window: anytime from now until the blood is due."""
+    now = now_local()
+    due_iso = normalize_due_date(required_by, now)
+    if not due_iso:
+        return "any time before the patient needs it"
+    due_spoken = format_date_spoken(due_iso)
+    if due_iso == now.strftime("%Y-%m-%d"):
+        return "any time today"
+    return f"any time between now and {due_spoken}"
 
 
 def format_spoken(date_iso: str, time_str: str = "10:00 AM") -> str:
     """Natural phrase for TTS."""
     dt = appt_datetime(date_iso, time_str)
+    spoken_time = speak_time(time_str)
     if not dt:
-        parts = [p for p in (date_iso, time_str) if p]
+        parts = [p for p in (date_iso, spoken_time) if p]
         return " at ".join(parts) if parts else "the scheduled time"
     day = dt.strftime("%A, %d %B")
-    spoken_time = dt.strftime("%I:%M %p").lstrip("0")
     if dt.date() == now_local().date():
         return f"today at {spoken_time}"
     if dt.date() == (now_local() + timedelta(days=1)).date():

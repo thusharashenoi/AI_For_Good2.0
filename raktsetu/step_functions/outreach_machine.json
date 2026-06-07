@@ -27,7 +27,7 @@
     },
     "WaitForReply": {
       "Type": "Wait",
-      "Seconds": 14400,
+      "Seconds": 15,
       "Next": "CheckReplyStatus"
     },
     "CheckReplyStatus": {

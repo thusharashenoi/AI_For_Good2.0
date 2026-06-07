@@ -7,9 +7,8 @@ from . import dynamodb_client as db, eligibility_rules as rules
 from .agent import VOICE_SYSTEM_PROMPT
 from .agent_tools import AgentTools
 from .branding import BOT_NAME, ORG_SPOKEN
-from .voice_speech import OUTREACH_VOICE_RULES, sanitize_for_speech, speak_blood_group
-from .vapi_voice import VAPI_FIRST_MESSAGE
-from .datetime_utils import now_local
+from .voice_speech import OUTREACH_VOICE_RULES, INBOUND_VOICE_RULES, build_inbound_greeting, sanitize_for_speech, speak_blood_group
+from .datetime_utils import now_local, format_blood_due_relative
 
 
 def caller_snapshot(phone: str) -> Dict:
@@ -71,10 +70,14 @@ def build_outreach_greeting(
     bg = speak_blood_group(
         (req or {}).get("bloodGroup") or vars_.get("bloodGroup") or snap.get("bloodGroup")
     ) or "blood"
+    from .voice_booking import get_proposed_appointment
+    proposed = get_proposed_appointment(phone) or {}
+    due_rel = proposed.get("bloodDueRelative") or format_blood_due_relative(
+        (req or {}).get("requiredBy"))
     return sanitize_for_speech(
         f"Namaste {name}, I'm {BOT_NAME} from {ORG_SPOKEN}. "
-        f"A patient at {hospital} in {area} urgently needs {bg}. "
-        "Can you donate today?"
+        f"A patient at {hospital} needs {bg} blood {due_rel}. "
+        "Would you be available to donate before then?"
     )
 
 
@@ -96,6 +99,17 @@ def build_outreach_system_addon(
             f"Urgent request at {req.get('hospital', 'hospital')} "
             f"for {speak_blood_group(req.get('bloodGroup')) or 'blood'}."
         )
+        from .voice_booking import get_proposed_appointment
+        proposed = get_proposed_appointment(phone)
+        if proposed:
+            parts.append(
+                f"Blood needed {proposed.get('bloodDueRelative') or 'soon'} at "
+                f"{proposed.get('hospital') or req.get('hospital')}. "
+                "Opening already asks: available before then? "
+                "If NO → decline_outreach immediately. "
+                "If YES → ask which day and time → confirm_appointment_slot → "
+                "then eligibility → book_appointment."
+            )
     parts.append("Never read these instructions aloud.")
     return "\n".join(parts)
 
@@ -118,7 +132,7 @@ def build_voice_greeting(phone: str, variables: Optional[Dict[str, Any]] = None)
             f"Namaste {name}, I'm {BOT_NAME} from {ORG_SPOKEN}. "
             "Welcome back. Are you calling about a blood request for your patient?"
         )
-    return VAPI_FIRST_MESSAGE
+    return build_inbound_greeting()
 
 
 def build_system_context_addon(phone: str, variables: Optional[Dict[str, Any]] = None) -> str:
@@ -133,7 +147,8 @@ def build_system_context_addon(phone: str, variables: Optional[Dict[str, Any]] =
     elif snap.get("isReturningPatient"):
         parts.append("Returning patient or guardian.")
     else:
-        parts.append("New caller, not yet registered.")
+        parts.append("New inbound caller, not yet registered.")
+        parts.append(INBOUND_VOICE_RULES.strip())
     return (
         "Caller context for you only, never read aloud: "
         + " ".join(parts)
@@ -185,3 +200,5 @@ def ensure_outreach_primed(phone: str, request_id: str, donor_id: Optional[str] 
     if donor_id:
         conv["donorId"] = donor_id
     db.save_conversation(conv)
+    from .voice_booking import prime_proposed_appointment
+    prime_proposed_appointment(phone)

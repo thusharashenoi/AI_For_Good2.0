@@ -66,21 +66,15 @@ def keypress_no(lang: str) -> str:
 
 def inbound_welcome(lang: str, gather_action: str) -> str:
     """Inbound registration call: greet + gather speech."""
-    msg = {
-        "en": ("Welcome to Blood Warriors. Are you a blood donor or a patient needing "
-               "blood? Please say donor or patient after the beep."),
-        "hi": ("Blood Warriors में आपका स्वागत है। आप रक्तदाता हैं या मरीज़? बीप के बाद "
-               "donor या patient बोलें।"),
-        "te": ("Blood Warriors కి స్వాగతం. మీరు రక్తదాతా లేదా రోగియా? బీప్ తర్వాత donor లేదా "
-               "patient అని చెప్పండి."),
-    }
+    from shared.voice_speech import build_inbound_greeting
+    msg = build_inbound_greeting()
     lang = lang if lang in i18n.SUPPORTED else "en"
     cfg = i18n.VOICE_CONFIG.get(lang, i18n.VOICE_CONFIG["en"])
     return (f"{XML_HEADER}<Response>"
-            f"{_say(msg[lang], lang)}"
+            f"{_say(msg, lang)}"
             f'<Gather input="speech" language="{cfg["language"]}" speechTimeout="auto" '
             f'action="{escape(gather_action)}" method="POST"></Gather>'
-            f"{_say(msg[lang], lang)}"
+            f"{_say(msg, lang)}"
             f"</Response>")
 
 

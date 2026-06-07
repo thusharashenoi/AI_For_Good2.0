@@ -18,7 +18,8 @@ def test_returning_donor_greeting():
 def test_new_caller_greeting():
     phone = "+919876501002"
     greeting = vapi_context.build_voice_greeting(phone)
-    assert "blood donor" in greeting.lower()
+    assert "Blood Warriors" in greeting or "blood" in greeting.lower()
+    assert "donor" in greeting.lower() or "help" in greeting.lower()
 
 
 def test_get_state_returning_caller():
@@ -49,11 +50,11 @@ def test_registration_tool_schedules_end_call(monkeypatch):
     phone = "+919876501005"
     ended = []
 
-    def fake_end(message, **kw):
-        ended.append({"message": message, **kw})
+    def fake_hangup(message, goodbye):
+        ended.append({"goodbye": goodbye})
         return {"ok": True}
 
-    monkeypatch.setattr("shared.vapi_client.end_call", fake_end)
+    monkeypatch.setattr("shared.vapi_client.hangup_after_goodbye", fake_hangup)
     event = {
         "body": __import__("json").dumps({
             "message": {
@@ -79,6 +80,7 @@ def test_registration_tool_schedules_end_call(monkeypatch):
     results = __import__("json").loads(resp["body"])["results"]
     assert results[0].get("message")
     assert "Thank you" in results[0]["message"]
+    assert "do not speak" in results[0]["result"].lower()
     assert len(ended) == 1
     assert ended[0].get("goodbye")
     donor = db.get_donor_by_phone(phone)
@@ -89,11 +91,11 @@ def test_book_appointment_schedules_end_call(monkeypatch):
     phone = "+919876501006"
     ended = []
 
-    def fake_end(message, **kw):
-        ended.append(kw)
+    def fake_hangup(message, goodbye):
+        ended.append({"goodbye": goodbye})
         return {"ok": True}
 
-    monkeypatch.setattr("shared.vapi_client.end_call", fake_end)
+    monkeypatch.setattr("shared.vapi_client.hangup_after_goodbye", fake_hangup)
     tools = AgentTools(phone, channel="voice")
     tools.complete_donor_registration(
         name="Appt End Test", age=30, weight=70, blood_group="A+", area="Madhapur")
@@ -106,6 +108,9 @@ def test_book_appointment_schedules_end_call(monkeypatch):
     conv = db.get_conversation(phone)
     conv["activeRequestId"] = req_id
     db.save_conversation(conv)
+    from shared.voice_booking import prime_proposed_appointment
+    prime_proposed_appointment(phone)
+    tools.confirm_appointment_slot(date="2026-06-10", time="10:00 AM")
 
     event = {
         "body": __import__("json").dumps({
@@ -128,8 +133,73 @@ def test_book_appointment_schedules_end_call(monkeypatch):
     results = __import__("json").loads(resp["body"])["results"]
     assert "Thank you" in results[0]["message"]
     assert "NIAT Hospital" in results[0]["message"]
+    assert "do not speak" in results[0]["result"].lower()
     assert len(ended) == 1
     assert "Namaste" in ended[0]["goodbye"]
+
+
+def test_outreach_greeting_asks_availability_before_deadline():
+    from shared import vapi_context
+    from shared import dynamodb_client as db
+    phone = "+919876501070"
+    AgentTools(phone, channel="voice").complete_donor_registration(
+        name="Greeting Donor", age=30, weight=70, blood_group="A+", area="Madhapur")
+    vapi_context.ensure_outreach_primed(phone, "req-greet-1")
+    conv = db.get_conversation(phone)
+    conv["activeRequestId"] = "req-greet-1"
+    db.save_request({
+        "requestId": "req-greet-1", "bloodGroup": "A+", "hospital": "NIAT Hospital",
+        "requiredBy": "tomorrow", "status": "open", "assignedDonors": [],
+    })
+    db.save_conversation(conv)
+    greeting = vapi_context.build_outreach_greeting(phone, {"hospital": "NIAT Hospital"})
+    assert "before then" in greeting.lower()
+    assert "NIAT" in greeting
+
+
+def test_decline_outreach_hangs_up(monkeypatch):
+    phone = "+919876501071"
+    ended = []
+
+    def fake_hangup(message, goodbye):
+        ended.append({"goodbye": goodbye})
+        return {"ok": True}
+
+    monkeypatch.setattr("shared.vapi_client.hangup_after_goodbye", fake_hangup)
+    tools = AgentTools(phone, channel="voice")
+    tools.complete_donor_registration(
+        name="Decline Test", age=30, weight=70, blood_group="O+", area="Madhapur")
+    req_id = db.new_id()
+    db.save_request({
+        "requestId": req_id, "bloodGroup": "O+", "hospital": "Apollo",
+        "requiredBy": "tomorrow", "status": "open", "assignedDonors": [],
+    })
+    vapi_context.ensure_outreach_primed(phone, req_id)
+
+    event = {
+        "body": __import__("json").dumps({
+            "message": {
+                "type": "tool-calls",
+                "call": {
+                    "id": "call-decline",
+                    "customer": {"number": phone},
+                    "monitor": {"controlUrl": "https://example.com/control"},
+                },
+                "toolCallList": [{
+                    "id": "tc-decline",
+                    "name": "decline_outreach",
+                    "arguments": {"reason": "not_available"},
+                }],
+            },
+        }),
+    }
+    resp = vapi_tools.handler(event)
+    results = __import__("json").loads(resp["body"])["results"]
+    assert "do not speak" in results[0]["result"].lower()
+    assert len(ended) == 1
+    assert "Namaste" in ended[0]["goodbye"]
+    conv = db.get_conversation(phone)
+    assert conv.get("awaitingOutreachReply") is False
 
 
 def test_outreach_greeting_when_awaiting_reply():
@@ -138,7 +208,7 @@ def test_outreach_greeting_when_awaiting_reply():
         name="Outreach Test", age=30, weight=70, blood_group="A+", area="Madhapur")
     vapi_context.ensure_outreach_primed(phone, "req-test-123")
     greeting = vapi_context.build_voice_greeting(phone)
-    assert "urgently needs" in greeting.lower() or "can you donate" in greeting.lower()
+    assert "before then" in greeting.lower() or "available" in greeting.lower()
     assert "blood donor" not in greeting.lower() or "patient or guardian" not in greeting.lower()
 
 
@@ -168,7 +238,7 @@ def test_get_state_outreach_voice_summary():
 
     summary = format_tool_result_for_voice("get_state", {"awaitingOutreachReply": True, "outreachMode": True})
     assert "Outreach call" in summary
-    assert "register" in summary.lower()
+    assert "decline_outreach" in summary.lower()
 
 
 def test_inline_outreach_after_patient_request():

@@ -164,6 +164,11 @@ def _maybe_reengage(conv: Dict, text: str) -> Optional[List[str]]:
 def _handle_outreach_reply(conv: Dict, text: str) -> List[str]:
     lang = conv["language"]
     conv["awaitingOutreachReply"] = False
+    conv["outreachEscalationToken"] = None
+    if conv.get("activeRequestId") and conv.get("donorId"):
+        from shared import voice_escalation_scheduler
+        voice_escalation_scheduler.cancel_escalation(
+            conv["activeRequestId"], conv["donorId"])
     request_id = conv.get("activeRequestId")
     if v.is_yes(text):
         # Begin fast eligibility check (FLOW 5).

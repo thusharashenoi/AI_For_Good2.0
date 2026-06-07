@@ -27,11 +27,23 @@ def _current_donor(req: dict):
 
 
 def handler(event, context=None):
+    if event.get("onlyIfNoReply") or event.get("action") == "outreach_voice_escalation":
+        from shared.outreach import escalate_to_voice_if_no_reply
+        return escalate_to_voice_if_no_reply(
+            event.get("requestId"),
+            event.get("donorId"),
+            token=event.get("token"),
+        )
+
     request_id = event.get("requestId")
     req = db.get_request(request_id) if request_id else None
     if not req:
         return {"requestId": request_id, "status": "error"}
-    donor = _current_donor(req)
+    donor_id = event.get("donorId")
+    if donor_id:
+        donor = db.get_donor(donor_id)
+    else:
+        donor = _current_donor(req)
     if not donor:
         return {"requestId": request_id, "status": "no_donors"}
 

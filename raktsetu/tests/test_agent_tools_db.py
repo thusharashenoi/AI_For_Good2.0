@@ -116,6 +116,7 @@ def test_book_appointment_fills_all_fields():
     conv["activeRequestId"] = req_id
     db.save_conversation(conv)
 
+    dt.confirm_appointment_slot(date="2026-06-10", time="11:00 AM")
     book = dt.book_appointment(request_id=req_id, date="2026-06-10", time="11:00 AM")
     assert book["ok"] is True
 
