@@ -52,6 +52,31 @@ def test_format_blood_due_relative():
             format_blood_due_relative("2026-06-09") == "in 3 days"
 
 
+def test_format_ask_donation_time_tomorrow():
+    from unittest.mock import patch
+    from shared.datetime_utils import format_ask_donation_time_spoken, IST
+    from datetime import datetime
+
+    fixed = datetime(2026, 6, 6, 14, 0, tzinfo=IST)
+    with patch("shared.datetime_utils.now_local", return_value=fixed):
+        q = format_ask_donation_time_spoken("tomorrow", "NIAT Hospital")
+    assert "tomorrow" in q
+    assert "NIAT" in q
+    assert "which day" not in q
+
+
+def test_format_ask_donation_time_today():
+    from unittest.mock import patch
+    from shared.datetime_utils import format_ask_donation_time_spoken, IST
+    from datetime import datetime
+
+    fixed = datetime(2026, 6, 6, 14, 0, tzinfo=IST)
+    with patch("shared.datetime_utils.now_local", return_value=fixed):
+        q = format_ask_donation_time_spoken("today", "Apollo")
+    assert "today" in q
+    assert "which day" not in q
+
+
 def test_schedule_reminders_24h_and_3h_before():
     scheduler.SCHEDULED.clear()
     appt = {

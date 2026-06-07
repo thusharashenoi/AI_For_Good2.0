@@ -21,8 +21,8 @@ def _seed_outreach(donor_phone: str, patient_phone: str) -> str:
 
 
 def test_prime_proposed_appointment_on_outreach():
-    donor_phone = "+919876502050"
-    request_id = _seed_outreach(donor_phone, "+919876502051")
+    donor_phone = "+919483399667"
+    request_id = _seed_outreach(donor_phone, "+919483399667")
     proposed = prime_proposed_appointment(donor_phone)
     assert proposed
     assert proposed["hospital"] == "Apollo"
@@ -31,12 +31,14 @@ def test_prime_proposed_appointment_on_outreach():
     assert proposed["bloodDueSpoken"]
     assert proposed["availabilityWindowSpoken"]
     assert proposed["availabilityConfirmed"] is False
+    assert proposed.get("askTimeOnly") is True
+    assert "tomorrow" in (proposed.get("slotQuestionSpoken") or "")
     assert proposed["requestId"] == request_id
 
 
 def test_check_eligibility_returns_proposed_slot():
-    donor_phone = "+919876502052"
-    _seed_outreach(donor_phone, "+919876502053")
+    donor_phone = "+919483399667"
+    _seed_outreach(donor_phone, "+919483399667")
     tools = AgentTools(donor_phone, channel="voice")
     tools.save_eligibility_answers(
         diabetes_insulin=False, tattoo_6mo=False, fever_or_antibiotics_2wk=False,
@@ -47,8 +49,8 @@ def test_check_eligibility_returns_proposed_slot():
 
 
 def test_book_requires_availability_confirmation():
-    donor_phone = "+919876502058"
-    request_id = _seed_outreach(donor_phone, "+919876502059")
+    donor_phone = "+919483399667"
+    request_id = _seed_outreach(donor_phone, "+919483399667")
     tools = AgentTools(donor_phone, channel="voice")
     book = tools.book_appointment(request_id=request_id)
     assert book.get("ok") is False
@@ -57,8 +59,8 @@ def test_book_requires_availability_confirmation():
 
 
 def test_full_voice_booking_pipeline():
-    donor_phone = "+919876502054"
-    request_id = _seed_outreach(donor_phone, "+919876502055")
+    donor_phone = "+919483399667"
+    request_id = _seed_outreach(donor_phone, "+919483399667")
     tools = AgentTools(donor_phone, channel="voice")
     tools.save_eligibility_answers(
         diabetes_insulin=False, tattoo_6mo=False, fever_or_antibiotics_2wk=False,
@@ -104,8 +106,8 @@ def test_full_voice_booking_pipeline():
 
 
 def test_finalize_voice_booking_idempotent_whatsapp():
-    donor_phone = "+919876502056"
-    request_id = _seed_outreach(donor_phone, "+919876502057")
+    donor_phone = "+919483399667"
+    request_id = _seed_outreach(donor_phone, "+919483399667")
     tools = AgentTools(donor_phone, channel="voice")
     tools.confirm_appointment_slot(time="10:00 AM")
     book = tools.book_appointment(request_id=request_id)

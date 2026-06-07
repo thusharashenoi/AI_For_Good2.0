@@ -109,6 +109,36 @@ def format_blood_due_spoken(required_by: Optional[str]) -> str:
     return raw.replace("_", " ")
 
 
+def outreach_slot_days_until(required_by: Optional[str]) -> Optional[int]:
+    """Calendar days from today until blood is due (None if unknown)."""
+    due_iso = normalize_due_date(required_by)
+    if not due_iso:
+        return None
+    due_dt = appt_datetime(due_iso, "12:00 PM")
+    if not due_dt:
+        return None
+    return (due_dt.date() - now_local().date()).days
+
+
+def format_ask_donation_time_spoken(
+    required_by: Optional[str],
+    hospital: Optional[str] = None,
+) -> str:
+    """Context-aware question after donor says YES — no redundant 'which day' when due is tomorrow."""
+    hospital = (hospital or "the hospital").strip()
+    days = outreach_slot_days_until(required_by)
+    if days is None:
+        return f"what day and time work for you at {hospital} before blood is needed"
+    if days <= 0:
+        return f"what time today you can come to {hospital}"
+    if days == 1:
+        return f"what time tomorrow works for you at {hospital}"
+    if days == 2:
+        return f"what time the day after tomorrow works at {hospital}"
+    due_spoken = format_date_spoken(normalize_due_date(required_by))
+    return f"which day before {due_spoken} works and what time at {hospital}"
+
+
 def format_blood_due_relative(required_by: Optional[str]) -> str:
     """Spoken relative deadline e.g. 'tomorrow', 'in 3 days'."""
     due_iso = normalize_due_date(required_by)

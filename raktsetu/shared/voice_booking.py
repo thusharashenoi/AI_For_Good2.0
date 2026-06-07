@@ -7,11 +7,13 @@ from typing import Dict, Optional
 from . import dynamodb_client as db
 from .datetime_utils import (
     default_appointment_slot,
+    format_ask_donation_time_spoken,
     format_availability_window,
     format_blood_due_relative,
     format_blood_due_spoken,
     format_spoken,
     normalize_due_date,
+    outreach_slot_days_until,
 )
 from .voice_speech import sanitize_for_speech
 
@@ -27,6 +29,7 @@ def proposed_appointment_for_request(req: dict) -> dict:
     blood_due = format_blood_due_spoken(required_by)
     due_relative = format_blood_due_relative(required_by)
     window = format_availability_window(required_by)
+    days_until = outreach_slot_days_until(required_by)
     return {
         "hospital": hospital,
         "date": date_iso,
@@ -38,6 +41,9 @@ def proposed_appointment_for_request(req: dict) -> dict:
         "bloodDueRelative": due_relative,
         "availabilityWindowSpoken": window,
         "availabilityConfirmed": False,
+        "daysUntilDue": days_until,
+        "slotQuestionSpoken": format_ask_donation_time_spoken(required_by, hospital),
+        "askTimeOnly": days_until is not None and days_until <= 1,
     }
 
 

@@ -110,10 +110,18 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
             if proposed.get("availabilityConfirmed"):
                 slot_hint = f" Time confirmed for {hospital}. Continue with health questions."
             else:
+                slot_q = proposed.get("slotQuestionSpoken") or (
+                    f"what time works before blood is needed {due_rel} at {hospital}"
+                )
+                ask_only = proposed.get("askTimeOnly")
+                day_note = (
+                    " Ask TIME only — day is already tomorrow/today; do NOT ask which day."
+                    if ask_only else ""
+                )
                 slot_hint = (
-                    f" Blood needed {due_rel} at {hospital}. "
-                    "If they said NO to donating before then, call decline_outreach. "
-                    "If YES, ask which day and time, then confirm_appointment_slot."
+                    f" Blood needed {due_rel} at {hospital}.{day_note} "
+                    "If they said NO, call decline_outreach. If YES, ask naturally: "
+                    f"{slot_q} — then confirm_appointment_slot."
                 )
             checklist = result.get("eligibilityChecklist") or {}
             if checklist.get("readyToEvaluate"):
@@ -209,10 +217,10 @@ def format_tool_result_for_voice(tool_name: str, result: Dict[str, Any]) -> str:
             due = result.get("bloodDueSpoken") or "soon"
             due_rel = result.get("bloodDueRelative") or due
             return (
-                f"They must confirm availability first. Ask if they can donate before "
-                f"blood is needed {due_rel}. If NO, call decline_outreach. "
-                "If YES, ask which day and time, call confirm_appointment_slot, "
-                "then eligibility, then book_appointment."
+                f"They must confirm availability first. Blood is needed {due_rel}. "
+                "If NO, call decline_outreach. If YES, use slotQuestionSpoken from get_state "
+                "(time-only when due is today or tomorrow) → confirm_appointment_slot → "
+                "eligibility → book_appointment."
             )
         reason = result.get("reason") or "missing details"
         return f"Could not book yet because of {reason.replace('_', ' ')}. Explain and continue."
@@ -258,11 +266,20 @@ You placed this call because a patient urgently needs blood. The person answerin
 - Do NOT start donor registration or collect name, age, weight, area, etc.
 - Do NOT call complete_donor_registration or raise_blood_request on this call.
 
+# CONTEXT AWARENESS (CRITICAL)
+- The opening already said WHEN blood is needed (today / tomorrow / in N days) and WHICH hospital.
+- NEVER repeat the same deadline or hospital unless the donor asks.
+- After they say YES, use slotQuestionSpoken from get_state / proposedAppointment — ask THAT question verbatim in natural speech.
+- If blood is due TOMORROW: ask ONLY what TIME tomorrow — do NOT ask "which day".
+- If blood is due TODAY: ask ONLY what TIME today — do NOT ask "which day".
+- If due in 2+ days: ask which day before the deadline AND what time.
+- Every question must fit the deadline you already stated. Never ask something that ignores the urgency.
+
 STRICT ORDER — follow exactly:
 1. OPENING (already spoken): blood is needed at the hospital by [deadline]. Ask if they can donate BEFORE then.
 2. If they say NO / not available / cannot: call decline_outreach immediately — do not ask anything else. The call will end.
-3. If they say YES: ask which DAY and what TIME works for them before the deadline.
-4. When they give day and time: call confirm_appointment_slot with date and time.
+3. If they say YES: ask using slotQuestionSpoken (time-only when due is today or tomorrow).
+4. When they give day and/or time: call confirm_appointment_slot with date and time.
 5. Then call get_eligibility_checklist, ask missing health topics, save_eligibility_answers, check_eligibility when ready.
 6. If eligible: call book_appointment — WhatsApp confirmation is sent and the call ends automatically. Do not speak after book_appointment succeeds.
 7. If not eligible or in cooldown: thank them honestly and end warmly.

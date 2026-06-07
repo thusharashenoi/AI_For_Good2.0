@@ -50,7 +50,7 @@ def test_registration_tool_schedules_end_call(monkeypatch):
     phone = "+919876501005"
     ended = []
 
-    def fake_hangup(message, goodbye):
+    def fake_hangup(message, goodbye, **kwargs):
         ended.append({"goodbye": goodbye})
         return {"ok": True}
 
@@ -91,7 +91,7 @@ def test_book_appointment_schedules_end_call(monkeypatch):
     phone = "+919876501006"
     ended = []
 
-    def fake_hangup(message, goodbye):
+    def fake_hangup(message, goodbye, **kwargs):
         ended.append({"goodbye": goodbye})
         return {"ok": True}
 
@@ -131,7 +131,7 @@ def test_book_appointment_schedules_end_call(monkeypatch):
     }
     resp = vapi_tools.handler(event)
     results = __import__("json").loads(resp["body"])["results"]
-    assert "Thank you" in results[0]["message"]
+    assert "lifesaver" in results[0]["message"].lower()
     assert "NIAT Hospital" in results[0]["message"]
     assert "do not speak" in results[0]["result"].lower()
     assert len(ended) == 1
@@ -161,7 +161,7 @@ def test_decline_outreach_hangs_up(monkeypatch):
     phone = "+919876501071"
     ended = []
 
-    def fake_hangup(message, goodbye):
+    def fake_hangup(message, goodbye, **kwargs):
         ended.append({"goodbye": goodbye})
         return {"ok": True}
 

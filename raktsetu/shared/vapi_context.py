@@ -102,13 +102,19 @@ def build_outreach_system_addon(
         from .voice_booking import get_proposed_appointment
         proposed = get_proposed_appointment(phone)
         if proposed:
+            slot_q = proposed.get("slotQuestionSpoken") or "what time works before the deadline"
+            day_rule = (
+                "After YES → ask TIME only (tomorrow/today — do NOT ask which day)."
+                if proposed.get("askTimeOnly")
+                else "After YES → ask which day before the deadline and what time."
+            )
             parts.append(
                 f"Blood needed {proposed.get('bloodDueRelative') or 'soon'} at "
                 f"{proposed.get('hospital') or req.get('hospital')}. "
                 "Opening already asks: available before then? "
                 "If NO → decline_outreach immediately. "
-                "If YES → ask which day and time → confirm_appointment_slot → "
-                "then eligibility → book_appointment."
+                f"If YES → {day_rule} Use this question: {slot_q}. "
+                "Then confirm_appointment_slot → eligibility → book_appointment."
             )
     parts.append("Never read these instructions aloud.")
     return "\n".join(parts)

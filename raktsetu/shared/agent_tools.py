@@ -569,9 +569,9 @@ class AgentTools:
                     "bloodDueRelative": proposed.get("bloodDueRelative") or due,
                     "availabilityWindowSpoken": window,
                     "hint": (
-                        f"MANDATORY: tell them blood is needed by {due}. Ask if they can donate "
-                        f"{window} and what time works. Then call confirm_appointment_slot, "
-                        "then book_appointment."
+                        f"MANDATORY: blood is needed {due}. If they said YES, ask using "
+                        f"slotQuestionSpoken from get_state (time-only if due tomorrow/today). "
+                        "Then call confirm_appointment_slot, then book_appointment."
                     ),
                 }
 
@@ -793,7 +793,7 @@ TOOL_SCHEMAS: List[Dict] = [
          "date": {"type": "string", "description": "free text date — omit to use proposed slot"},
          "time": {"type": "string", "description": "e.g. 10:00 AM — omit to use proposed slot"}}}},
     {"name": "confirm_appointment_slot",
-     "description": "After the donor said YES they are available before the blood deadline, ask which day and time works, then save it here. Only call AFTER they give a specific day/time. Then proceed to eligibility.",
+     "description": "After donor said YES and gave a time (and day if needed). If blood is due tomorrow, they only give a time — pass date as 'tomorrow' or omit. Saves slot before eligibility/booking.",
      "parameters": {"type": "object", "properties": {
          "date": {"type": "string", "description": "donor's preferred date free text"},
          "time": {"type": "string", "description": "donor's preferred time e.g. 2:00 PM"}},
