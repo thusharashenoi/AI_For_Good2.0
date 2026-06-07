@@ -39,6 +39,7 @@ from lambdas.voice_keypress import handler as voice_keypress  # noqa: E402
 from lambdas.periskope_webhook import handler as periskope_webhook  # noqa: E402
 from lambdas.vapi_tools import handler as vapi_tools  # noqa: E402
 from lambdas.exotel_connect import handler as exotel_connect  # noqa: E402
+from shared import twilio_inbound_poll  # noqa: E402
 
 PORT = int(config.get("PORT", "4000") or "4000")
 
@@ -150,6 +151,8 @@ def main():
     print("=" * 60)
     print(" Next: run `ngrok http %d` and set that URL + /whatsapp" % PORT)
     print("       as your Twilio WhatsApp Sandbox inbound webhook.\n")
+    if config.get("TWILIO_INBOUND_POLL", "1") == "1":
+        twilio_inbound_poll.start_background()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

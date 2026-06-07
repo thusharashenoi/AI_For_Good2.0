@@ -48,28 +48,78 @@ function FillBar({ active, buffer, vacant, target }) {
   );
 }
 
-function CandidatesDrawer({ patient, onClose }) {
+function BridgeDrawer({ patient, onClose }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
+  const [broadcast, setBroadcast] = useState(null);
+  const [broadcasting, setBroadcasting] = useState(false);
+
   useEffect(() => {
     if (!patient) return;
-    setData(null); setErr(null);
+    setData(null); setErr(null); setBroadcast(null);
+    if (patient.candidatePreview?.candidates?.length) {
+      setData({
+        candidates: patient.candidatePreview.candidates,
+        patientId: patient.patientId,
+        patientName: patient.name,
+        count: patient.candidatePreview.candidates.length,
+      });
+      return;
+    }
     api.candidates(patient.patientId, 12).then(setData).catch((e) => setErr(String(e)));
   }, [patient]);
+
+  async function handleBroadcast() {
+    if (!patient?.bridgeId) return;
+    setBroadcasting(true); setErr(null);
+    try {
+      const res = await api.broadcastBridge(patient.bridgeId);
+      setBroadcast(res);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBroadcasting(false);
+    }
+  }
+
   if (!patient) return null;
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-ink/30 backdrop-blur-sm" onClick={onClose}>
       <div className="w-full max-w-md h-full bg-surface border-l border-line p-6 overflow-y-auto shadow-2xl"
         onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
-          <h3 className="text-lg font-head font-semibold text-ink">Proposed bridge</h3>
-          <button onClick={onClose} className="text-muted hover:text-ink text-lg">✕</button>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-lg font-head font-semibold text-ink">
+            {patient.formed ? "Bridge formed" : "Proposed bridge"}
+          </h3>
+          <div className="flex items-center gap-2">
+            {patient.formed && patient.bridgeId && (
+              <button onClick={handleBroadcast} disabled={broadcasting || broadcast?.ok}
+                className="px-3 py-1.5 rounded-lg bg-brand hover:bg-brand-dark disabled:opacity-50 text-white text-xs font-semibold transition-colors whitespace-nowrap">
+                {broadcasting ? "Sending…" : broadcast?.ok ? "Broadcast sent" : "Broadcast Message"}
+              </button>
+            )}
+            <button onClick={onClose} className="text-muted hover:text-ink text-lg">✕</button>
+          </div>
         </div>
         <div className="mt-1 text-sm text-muted">
           {patient.name || shortId(patient.patientId)} · <GroupTag g={patient.bloodGroup} />
+          {patient.bridgeId && (
+            <span className="block font-mono text-[11px] mt-0.5">{patient.bridgeId}</span>
+          )}
         </div>
+        {broadcast?.ok && (
+          <div className="mt-3 rounded-xl px-3 py-2 bg-success/10 border border-success/20 text-xs text-success-dark">
+            WhatsApp sent from {broadcast.senderPhone || "Blood Warriors bot"} to {broadcast.demoPhone}
+            ({broadcast.donorsTargeted} ranked donors).
+            If no reply in {broadcast.callDelaySec}s, a voice call will follow to the same number.
+          </div>
+        )}
         {err && <div className="mt-4 text-danger text-sm">{err}</div>}
-        {!data && !err && <div className="mt-6 text-muted">Ranking donors…</div>}
+        {!data && !err && (
+          <div className="mt-6 text-muted">
+            {patient.forming ? "Forming bridge…" : "Ranking donors…"}
+          </div>
+        )}
         {data && (
           <ol className="mt-4 space-y-2">
             {data.candidates.map((c, i) => (
@@ -84,7 +134,9 @@ function CandidatesDrawer({ patient, onClose }) {
                     <span className="text-sm text-ink font-medium">{c.name || shortId(c.donorId)}</span>
                     <GroupTag g={c.group} />
                   </div>
-                  <span className="font-bold text-ink">{c.score.toFixed(2)}</span>
+                  <span className="font-bold text-ink">
+                    {c.score != null ? Number(c.score).toFixed(2) : "—"}
+                  </span>
                 </div>
                 <div className="flex items-center gap-4 mt-1 pl-7 text-xs text-muted">
                   <span>📍 {c.city ? `${c.city} · ` : ""}{c.distanceKm != null ? `${c.distanceKm} km` : "—"}</span>
@@ -97,8 +149,7 @@ function CandidatesDrawer({ patient, onClose }) {
         )}
         <p className="mt-4 text-xs text-muted leading-relaxed">
           Ranked after gating on compatibility, 90-day eligibility, and patient-specific
-          availability. Score = proximity + show-up + willingness (ecosystem retention).
-          Top 6 → active rotation; backups follow the no-show policy.
+          availability. Top 6 → active rotation; backups follow the no-show policy.
         </p>
       </div>
     </div>
@@ -128,9 +179,11 @@ export default function App() {
   const [unbridged, setUnbridged] = useState(null);
   const [atRisk, setAtRisk] = useState(null);
   const [requests, setRequests] = useState(null);
+  const [appointments, setAppointments] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
+  const [formingPatientId, setFormingPatientId] = useState(null);
   const [tab, setTab] = useState("ops");
   const [graphBridgeId, setGraphBridgeId] = useState(null);
 
@@ -148,25 +201,44 @@ export default function App() {
       setUnbridged(d.unbridged);
       setAtRisk(d.atRisk);
       setRequests(req);
+      setAppointments(d.appointments);
     } catch (e) {
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+        setError("Cannot reach Admin API on :8000 — start it with: .venv/bin/python -m scripts.run_admin_api");
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
   }
 
   async function handleFormBridge(p) {
+    if (formingPatientId) return;
     setError(null);
+    setFormingPatientId(p.patientId);
+    setSelected({ ...p, forming: true, formed: false, candidatePreview: null });
     try {
       const res = await api.formBridge(p.patientId);
       if (!res.ok) {
+        setSelected(null);
         setError(`No bridge formed: ${res.reason || "no candidates"} (pool ${res.coverage ?? 0})`);
         return;
       }
-      setSelected({ ...p, bridgeId: res.bridgeId, formed: true });
-      await refresh();
+      setSelected({
+        ...p,
+        bridgeId: res.bridgeId,
+        formed: true,
+        forming: false,
+        candidatePreview: res,
+      });
+      refresh();
     } catch (e) {
+      setSelected(null);
       setError(String(e));
+    } finally {
+      setFormingPatientId(null);
     }
   }
   useEffect(() => { refresh(); }, []);
@@ -234,8 +306,12 @@ export default function App() {
       <main className="px-8 py-6 pb-16 space-y-6 max-w-[1400px] mx-auto">
         {error && tab === "ops" && (
           <div className="card p-4 border-brand/30 bg-brand-soft text-danger text-sm">
-            {error} — is the API running on :8000? Start it with{" "}
-            <code className="font-mono">scripts.run_admin_api</code>.
+            {error}
+            {!error.includes("Cannot reach") && (
+              <span className="block mt-1 text-muted">
+                Restart the API: <code className="font-mono">.venv/bin/python -m scripts.run_admin_api</code>
+              </span>
+            )}
           </div>
         )}
 
@@ -260,7 +336,7 @@ export default function App() {
 
         <div className="grid lg:grid-cols-2 gap-6">
           <Section title="Unbridged patients"
-            sub="No bridge yet — the planner can form a 6+4 bridge from the graph.">
+            sub="No committed bridge yet — form a 6+4 plan or broadcast to donors once planned.">
             <table className="w-full text-sm">
               <thead>
                 <tr className={thCls}><th className="text-left py-2 font-semibold">Patient</th><th>Group</th>
@@ -276,12 +352,9 @@ export default function App() {
                     <td className="text-right">{p.topScore?.toFixed(2) ?? "—"}</td>
                     <td className="text-right">
                       <button onClick={() => handleFormBridge(p)}
-                        className="px-3 py-1 rounded-lg bg-brand hover:bg-brand-dark text-white text-xs font-semibold transition-colors">
-                        Form bridge
-                      </button>
-                      <button onClick={() => setSelected(p)}
-                        className="ml-2 px-3 py-1 rounded-lg border border-line text-xs font-semibold text-muted hover:text-ink">
-                        Preview
+                        disabled={formingPatientId === p.patientId}
+                        className="px-3 py-1 rounded-lg bg-brand hover:bg-brand-dark disabled:opacity-60 disabled:cursor-wait text-white text-xs font-semibold transition-colors">
+                        {formingPatientId === p.patientId ? "Forming…" : "Form bridge"}
                       </button>
                     </td>
                   </tr>
@@ -347,8 +420,51 @@ export default function App() {
           </table>
         </Section>
 
+        <Section title="Donation appointments (WhatsApp / call)"
+          sub="Booked after bridge mobilization — health check → auto-scheduled slot.">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thCls}>
+                <th className="text-left py-2 font-semibold">Donor</th>
+                <th className="text-left">Patient</th>
+                <th>Group</th>
+                <th className="text-left">Hospital</th>
+                <th className="text-right">When</th>
+                <th className="text-center">Channel</th>
+                <th className="text-left">Bridge</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(appointments?.appointments || []).map((a) => (
+                <tr key={a.appointmentId} className="border-t border-line">
+                  <td className="py-2.5 text-ink font-medium">
+                    {a.donorName || shortId(a.donorPhone)}
+                    {a.donorPhone && (
+                      <span className="block text-muted font-normal text-[11px]">{a.donorPhone}</span>
+                    )}
+                  </td>
+                  <td className="text-ink">{a.patientName || "—"}</td>
+                  <td className="text-center"><GroupTag g={a.bloodGroup} /></td>
+                  <td className="text-muted">{a.hospital}{a.city ? ` · ${a.city}` : ""}</td>
+                  <td className="text-right text-muted whitespace-nowrap">
+                    {a.appointmentDate || "—"}
+                    {a.appointmentTime ? ` · ${a.appointmentTime}` : ""}
+                  </td>
+                  <td className="text-center text-xs uppercase">{a.channel || "—"}</td>
+                  <td className="text-muted font-mono text-[11px]">{a.bridgeId || "—"}</td>
+                </tr>
+              ))}
+              {appointments && appointments.appointments.length === 0 && (
+                <tr><td colSpan="7" className="py-4 text-center text-muted">
+                  No appointments yet — broadcast a bridge and complete YES + health check on WhatsApp.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </Section>
+
         <Section title="Bridge health"
-          sub="Active bar: red (&lt;6) · yellow (6–8) · green (9–10). Buffer (amber) · vacant (grey). Target = 10 donors.">
+          sub="Only patients with at least one agreed donor. Active bar: red (&lt;6) · yellow (6–8) · green (9–10). Target = 10 donors.">
           <table className="w-full text-sm">
             <thead>
               <tr className={thCls}><th className="text-left py-2 font-semibold">Bridge</th><th>Group</th><th>Status</th>
@@ -394,7 +510,7 @@ export default function App() {
         )}
       </main>
 
-      <CandidatesDrawer patient={selected} onClose={() => setSelected(null)} />
+      <BridgeDrawer patient={selected} onClose={() => setSelected(null)} />
     </div>
   );
 }

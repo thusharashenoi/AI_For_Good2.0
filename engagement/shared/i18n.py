@@ -216,12 +216,29 @@ MESSAGES: Dict[str, Dict[Lang, str]] = {
     },
     # --- Eligibility quick-check (FLOW 5) ---
     "ELIGIBILITY_CHECK_START": {
-        "en": ("Wonderful! Quick health check before we book your slot 🩸 "
-               "(Takes 2 minutes, reply YES or NO to each)"),
-        "hi": ("बढ़िया! स्लॉट बुक करने से पहले एक त्वरित स्वास्थ्य जांच 🩸 "
-               "(2 मिनट लगेंगे, हर सवाल पर YES या NO लिखें)"),
-        "te": ("అద్భుతం! స్లాట్ బుక్ చేసే ముందు ఒక త్వరిత ఆరోగ్య తనిఖీ 🩸 "
-               "(2 నిమిషాలు, ప్రతిదానికి YES లేదా NO అని పంపండి)"),
+        "en": "Great — 5 quick safety checks (tap ✅ YES or ❌ NO for each):",
+        "hi": "बढ़िया — 5 त्वरित सुरक्षा जांच (हर एक के लिए ✅ YES या ❌ NO):",
+        "te": "బాగుంది — 5 త్వరిత భద్రతా ప్రశ్నలు (ప్రతి ఒక్కదానికi ✅ YES లేదా ❌ NO):",
+    },
+    "ELIG_QUESTION_BUTTONS": {
+        "en": ("🩸 Quick check {step}/{total}\n{question}\n\n"
+               "Tap to reply:\n✅ YES    ·    ❌ NO"),
+        "hi": ("🩸 त्वरित जांच {step}/{total}\n{question}\n\n"
+               "उत्तर दें:\n✅ YES    ·    ❌ NO"),
+        "te": ("🩸 త్వరిత తనిఖీ {step}/{total}\n{question}\n\n"
+               "సమాధానం:\n✅ YES    ·    ❌ NO"),
+    },
+    "BRIDGE_ELIGIBLE_BOOKED": {
+        "en": ("You're cleared to donate! ✅\n\n"
+               "We've booked you using your Blood Graph profile "
+               "({donorName}, {bloodGroup}, {city}).\n\n"
+               "Appointment details follow 👇"),
+        "hi": ("आप दान के लिए तैयार हैं! ✅\n\n"
+               "Blood Graph प्रोफ़ाइल ({donorName}, {bloodGroup}, {city}) से बुक किया।\n\n"
+               "अपॉइंटमेंट विवरण 👇"),
+        "te": ("మీరు దానం చేయడానికి సిద్ధం! ✅\n\n"
+               "Blood Graph ప్రొఫైల్ ({donorName}, {bloodGroup}, {city}) తో బుక్ చేసాం.\n\n"
+               "అపాయింట్‌మెంట్ వివరాలు 👇"),
     },
     "ASK_DIABETES": {
         "en": "Do you have diabetes that requires insulin?",

@@ -29,9 +29,31 @@ def _digits(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
 
 
+DEFAULT_BOT_PHONE = "919076150904"
+
+
+def bot_phone_digits() -> str:
+    """Blood Warriors WhatsApp bot (sender for outbound mobilization messages)."""
+    twilio = config.get("TWILIO_WHATSAPP_NUMBER") or ""
+    if twilio:
+        return _digits(twilio) or DEFAULT_BOT_PHONE
+    return _digits(config.get("PERISKOPE_PHONE") or DEFAULT_BOT_PHONE) or DEFAULT_BOT_PHONE
+
+
 def org_phone() -> str:
-    p = config.get("PERISKOPE_PHONE") or config.get("TWILIO_WHATSAPP_NUMBER", "919076150904")
-    return _digits(p)
+    """Periskope x-phone header — must be the bot number, not the demo recipient."""
+    p = config.get("PERISKOPE_PHONE") or bot_phone_digits()
+    digits = _digits(p)
+    demo = _digits(config.get("DEMO_OUTREACH_PHONE") or "")
+    bot = bot_phone_digits()
+    if demo and digits == demo:
+        logger.warning(
+            "PERISKOPE_PHONE (%s) matches DEMO_OUTREACH_PHONE; using bot sender %s",
+            digits,
+            bot,
+        )
+        return bot
+    return digits or bot
 
 
 def chat_id_for(phone: str) -> str:

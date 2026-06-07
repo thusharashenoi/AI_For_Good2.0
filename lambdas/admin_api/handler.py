@@ -23,21 +23,27 @@ from __future__ import annotations
 
 import copy
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 import pandas as pd
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 from pydantic import BaseModel, Field
 
-from raktsetu import config, emergency, store, synth
+from raktsetu import broadcast, config, emergency, store, synth
 from raktsetu.bridge import formation_queue
+from raktsetu.graph import candidate_edges
 
 from .._common import (
+    bridge_has_commitment,
+    committed_bridges,
     edge_patient_stats,
     get_patient,
+    is_patient_committed_bridged,
+    is_patient_unbridged,
     load_bridge_state,
     load_edges,
     load_frames,
+    patient_bridge_id,
 )
 
 app = FastAPI(title="Blood Warriors Bridge Intelligence API", version="0.1.0")
@@ -65,55 +71,80 @@ def _warm_cache():
 
 def _stats_payload(donors: pd.DataFrame, patients: pd.DataFrame,
                    bridges: dict[str, dict]) -> dict:
+    committed = committed_bridges(bridges)
+    unbridged_n = sum(
+        1 for _, pat in patients.iterrows() if is_patient_unbridged(pat, bridges)
+    )
     return {
         "donors": int(len(donors)),
         "eligibleDonors": int(donors["eligible_now"].sum()) if "eligible_now" in donors else None,
         "avgShowRate": round(float(donors["show_rate"].mean()), 3) if "show_rate" in donors else None,
         "patients": int(len(patients)),
-        "unbridgedPatients": int(patients["bridge_id"].isna().sum()),
-        "bridges": len(bridges),
-        "formingBridges": sum(1 for b in bridges.values() if b["status"] == "FORMING"),
-        "vacantSlots": sum(b["vacant"] for b in bridges.values()),
+        "unbridgedPatients": unbridged_n,
+        "bridges": len(committed),
+        "formingBridges": sum(
+            1 for b in committed.values()
+            if b.get("status") == "FORMING" and bridge_has_commitment(b)
+        ),
+        "vacantSlots": sum(b["vacant"] for b in committed.values()),
     }
 
 
 def _bridges_payload(state: dict[str, dict], patients: pd.DataFrame) -> dict:
     pname = patients.set_index("user_id")["name"].to_dict() if "name" in patients.columns else {}
     out = []
-    for b in state.values():
+    for b in committed_bridges(state).values():
         row = dict(b)
         row.pop("slots", None)
         row["patientName"] = pname.get(row.get("patientId"))
         row["fill"] = row["active"] + row["buffer"]
         row["target"] = config.BRIDGE_SIZE
         out.append(row)
+    # One row per patient (drop duplicate FORMING bridges from repeated form actions).
+    by_patient: dict[str, dict] = {}
+    for row in out:
+        pid = row.get("patientId") or row.get("bridgeId")
+        prev = by_patient.get(pid)
+        if prev is None or (row.get("fill", 0), row.get("bridgeId", "")) > (
+            prev.get("fill", 0), prev.get("bridgeId", "")
+        ):
+            by_patient[pid] = row
+    out = list(by_patient.values())
     out.sort(key=lambda x: (x["fill"], x["vacant"]))
     return {"count": len(out), "bridges": out}
 
 
-def _unbridged_payload(patients: pd.DataFrame, edges: pd.DataFrame) -> dict:
+def _unbridged_payload(patients: pd.DataFrame, edges: pd.DataFrame,
+                       bridge_state: dict[str, dict]) -> dict:
     counts, best = edge_patient_stats(edges)
-    unb = patients[patients["bridge_id"].isna()]
     rows = []
-    for _, pat in unb.iterrows():
+    for _, pat in patients.iterrows():
+        if not is_patient_unbridged(pat, bridge_state):
+            continue
         pid = pat["user_id"]
-        rows.append({
+        row = {
             "patientId": pid,
             "name": pat.get("name"),
             "city": pat.get("city"),
             "bloodGroup": pat.get("bridge_blood_group_norm") or pat.get("blood_group_norm"),
             "candidatePool": int(counts.get(pid, 0)) if len(counts) else 0,
             "topScore": round(float(best.get(pid, 0.0)), 4) if len(best) else None,
-        })
+        }
+        bid = patient_bridge_id(pat)
+        if bid and bid in bridge_state and not bridge_has_commitment(bridge_state[bid]):
+            row["bridgeId"] = bid
+            row["forming"] = True
+        rows.append(row)
     return {"count": len(rows), "patients": rows}
 
 
-def _at_risk_payload(patients: pd.DataFrame, edges: pd.DataFrame, limit: int) -> dict:
+def _at_risk_payload(patients: pd.DataFrame, edges: pd.DataFrame, limit: int,
+                     bridge_state: dict[str, dict]) -> dict:
     counts, best = edge_patient_stats(edges)
     rows = []
     for _, pat in patients.iterrows():
         pid = pat["user_id"]
-        bridged = pat.get("bridge_id") is not None and str(pat.get("bridge_id")) not in ("nan", "None", "")
+        bridged = is_patient_committed_bridged(pat, bridge_state)
         rows.append({
             "patientId": pid,
             "name": pat.get("name"),
@@ -141,6 +172,83 @@ def _bridged_donor_ids(bridge_state: dict[str, dict], donors: pd.DataFrame) -> s
 def _patient_group(pat: pd.Series) -> str | None:
     g = pat.get("bridge_blood_group_norm") or pat.get("blood_group_norm")
     return None if pd.isna(g) else str(g)
+
+
+def _safe_num(v, default=0.0, ndigits: int | None = None):
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        if pd.isna(f):
+            return default
+        return round(f, ndigits) if ndigits is not None else f
+    except (TypeError, ValueError):
+        return default
+
+
+def _patient_edges(donors: pd.DataFrame, pat: pd.Series) -> pd.DataFrame:
+    """Edges for one patient only — avoids rebuilding the full population graph."""
+    if donors.empty:
+        return pd.DataFrame()
+    return candidate_edges(donors, pat.to_frame().T)
+
+
+def _ranked_candidates(patient_id: str, donors: pd.DataFrame, edges: pd.DataFrame,
+                       limit: int = 20) -> list[dict]:
+    """Ranked donor pool for a patient — JSON-safe (no NaN)."""
+    if donors.empty or edges.empty:
+        return []
+    dmeta = donors.drop_duplicates(subset=["user_id"], keep="first").set_index("user_id")
+    show_by_id = dmeta["show_rate"].to_dict() if "show_rate" in dmeta.columns else {}
+    will_by_id = dmeta["willingness"].to_dict() if "willingness" in dmeta.columns else {}
+    name_by_id = dmeta["name"].to_dict() if "name" in dmeta.columns else {}
+    city_by_id = dmeta["city"].to_dict() if "city" in dmeta.columns else {}
+    sub = edges[edges["patient_id"] == patient_id].sort_values("score", ascending=False).head(limit)
+    cands = []
+    for i, (_, r) in enumerate(sub.iterrows()):
+        did = r["donor_id"]
+        dist = r.get("distance_km")
+        cands.append({
+            "donorId": did,
+            "name": name_by_id.get(did),
+            "city": city_by_id.get(did),
+            "score": _safe_num(r["score"], ndigits=4),
+            "group": None if pd.isna(r.get("donor_group")) else r.get("donor_group"),
+            "distanceKm": _safe_num(dist, ndigits=1) if pd.notna(dist) else None,
+            "showRate": _safe_num(show_by_id.get(did, 0.8), ndigits=3),
+            "willingness": _safe_num(will_by_id.get(did, 0.5), ndigits=3),
+            "slotTypeHint": "active" if i < config.BRIDGE_ACTIVE_TARGET else "buffer",
+        })
+    return cands
+
+
+def _candidates_from_slots(slots: list[dict], patient_id: str,
+                           donors: pd.DataFrame, edges: pd.DataFrame,
+                           limit: int = 20) -> list[dict]:
+    """Enrich bridge slot assignments with donor metadata for the admin drawer."""
+    ranked = {c["donorId"]: c for c in _ranked_candidates(patient_id, donors, edges, limit=max(limit, 50))}
+    cands = []
+    for i, s in enumerate(slots):
+        did = s.get("donorId")
+        if not did:
+            continue
+        base = ranked.get(did, {"donorId": did})
+        slot_type = s.get("slotType") or ("active" if i < config.BRIDGE_ACTIVE_TARGET else "buffer")
+        cands.append({
+            "donorId": did,
+            "name": base.get("name"),
+            "city": base.get("city"),
+            "score": _safe_num(s.get("score") if s.get("score") is not None else base.get("score"), ndigits=4),
+            "group": base.get("group"),
+            "distanceKm": base.get("distanceKm"),
+            "showRate": base.get("showRate", 0.8),
+            "willingness": base.get("willingness", 0.5),
+            "slotTypeHint": slot_type,
+            "reason": s.get("reason"),
+        })
+        if len(cands) >= limit:
+            break
+    return cands
 
 
 def _donor_node(drow: pd.Series, *, role: str, donor_id: str | None = None,
@@ -192,7 +300,7 @@ def graph_overview(top_per_patient: int = 8):
     targets: list[tuple[pd.Series, str, int | None, str | None]] = []
     for _, pat in patients.iterrows():
         bid = pat.get("bridge_id")
-        if pd.isna(bid):
+        if pd.isna(bid) or is_patient_unbridged(pat, bridge_state):
             targets.append((pat, "unbridged", None, None))
             continue
         bs = bridge_state.get(str(bid), {})
@@ -376,14 +484,28 @@ def open_requests(limit: int = 20):
 @app.post("/bridges/form/{patient_id}")
 def form_bridge(patient_id: str):
     """Form a bridge from the Blood Graph for one unbridged patient (admin action)."""
-    donors, patients = load_frames(force=True)
-    load_bridge_state(force=True)
-    load_edges(force=True)
+    donors, patients = load_frames()
+    bridge_state = load_bridge_state()
     pat = get_patient(patients, patient_id)
     if pat is None:
         raise HTTPException(status_code=404, detail="patient not found")
-    if pat.get("bridge_id") is not None and str(pat.get("bridge_id")) not in ("nan", "None", ""):
+    if is_patient_committed_bridged(pat, bridge_state):
         raise HTTPException(status_code=400, detail="patient already has a bridge")
+    pat_edges = _patient_edges(donors, pat)
+    existing = patient_bridge_id(pat)
+    if existing and existing in bridge_state and not bridge_has_commitment(bridge_state[existing]):
+        b = bridge_state[existing]
+        slots = b.get("slots") or []
+        candidates = _candidates_from_slots(slots, patient_id, donors, pat_edges, limit=12)
+        return {
+            "ok": True,
+            "patientId": patient_id,
+            "bridgeId": existing,
+            "coverage": len(candidates),
+            "vacantSlots": b.get("vacant", 0),
+            "candidates": candidates,
+            "reused": True,
+        }
     plan = formation_queue(pat, donors)
     if not plan.slots:
         return {
@@ -393,12 +515,14 @@ def form_bridge(patient_id: str):
             "coverage": plan.coverage,
         }
     vacant = store.persist_bridge_plan(plan, "FORMING")
-    candidates = [{
+    load_bridge_state(force=True)
+    slots = [{
         "donorId": s.donor_id,
-        "score": round(float(s.score), 4),
+        "score": s.score,
         "slotType": s.slot_type,
         "reason": s.reason,
     } for s in plan.slots]
+    candidates = _candidates_from_slots(slots, patient_id, donors, pat_edges, limit=12)
     return {
         "ok": True,
         "patientId": patient_id,
@@ -407,6 +531,71 @@ def form_bridge(patient_id: str):
         "vacantSlots": vacant,
         "candidates": candidates,
     }
+
+
+@app.post("/bridges/{bridge_id}/broadcast")
+def broadcast_bridge(bridge_id: str, background_tasks: BackgroundTasks):
+    """One WhatsApp to demo phone; Vapi call after 30s if no reply."""
+    state = load_bridge_state(force=True)
+    bridge = state.get(bridge_id)
+    if not bridge:
+        raise HTTPException(status_code=404, detail="bridge not found")
+    donors, patients = load_frames(force=True)
+    pname = patients.set_index("user_id")["name"].to_dict() if "name" in patients.columns else {}
+    patient_name = pname.get(bridge.get("patientId"))
+    pat = get_patient(patients, bridge.get("patientId"))
+    patient_meta = None
+    if pat is not None:
+        patient_meta = {
+            k: (None if pd.isna(v) else v)
+            for k, v in pat.items()
+        }
+    detail = copy.deepcopy(bridge)
+    detail["slots"] = bridge.get("slots") or []
+    try:
+        result = broadcast.start_bridge_broadcast(
+            detail,
+            donors,
+            patient_name=patient_name,
+            patient_meta=patient_meta,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("reason") or "broadcast failed")
+    if result.get("broadcastId"):
+        background_tasks.add_task(
+            broadcast.run_call_escalation,
+            result["broadcastId"],
+            detail,
+            patient_name,
+        )
+    return result
+
+
+@app.get("/appointments")
+def list_appointments(limit: int = 20):
+    """Recent donation appointments booked via WhatsApp / voice outreach."""
+    rows = store.list_appointments(limit=limit)
+    out = []
+    for a in rows:
+        out.append({
+            "appointmentId": a.get("appointmentId"),
+            "bridgeId": a.get("bridgeId"),
+            "requestId": a.get("requestId"),
+            "donorName": a.get("donorName"),
+            "donorPhone": a.get("donorPhone"),
+            "patientName": a.get("patientName"),
+            "bloodGroup": a.get("bloodGroup"),
+            "hospital": a.get("hospital"),
+            "city": a.get("city"),
+            "appointmentDate": a.get("appointmentDate"),
+            "appointmentTime": a.get("appointmentTime"),
+            "status": a.get("status"),
+            "channel": a.get("channel"),
+            "createdAt": a.get("createdAt"),
+        })
+    return {"count": len(out), "appointments": out}
 
 
 @app.get("/dashboard")
@@ -418,8 +607,26 @@ def dashboard(at_risk_limit: int = 12):
     return {
         "stats": _stats_payload(donors, patients, bridge_state),
         "bridges": _bridges_payload(bridge_state, patients),
-        "unbridged": _unbridged_payload(patients, edges),
-        "atRisk": _at_risk_payload(patients, edges, at_risk_limit),
+        "unbridged": _unbridged_payload(patients, edges, bridge_state),
+        "atRisk": _at_risk_payload(patients, edges, at_risk_limit, bridge_state),
+        "appointments": {"appointments": [
+            {
+                "appointmentId": a.get("appointmentId"),
+                "bridgeId": a.get("bridgeId"),
+                "donorName": a.get("donorName"),
+                "donorPhone": a.get("donorPhone"),
+                "patientName": a.get("patientName"),
+                "bloodGroup": a.get("bloodGroup"),
+                "hospital": a.get("hospital"),
+                "city": a.get("city"),
+                "appointmentDate": a.get("appointmentDate"),
+                "appointmentTime": a.get("appointmentTime"),
+                "status": a.get("status"),
+                "channel": a.get("channel"),
+                "createdAt": a.get("createdAt"),
+            }
+            for a in store.list_appointments(limit=12)
+        ]},
     }
 
 
@@ -454,7 +661,7 @@ def list_patients():
 @app.get("/unbridged")
 def unbridged():
     _, patients = load_frames()
-    return _unbridged_payload(patients, load_edges())
+    return _unbridged_payload(patients, load_edges(), load_bridge_state())
 
 
 @app.get("/bridges")
@@ -482,37 +689,25 @@ def bridge_detail(bridge_id: str):
 @app.get("/at-risk")
 def at_risk(limit: int = 15):
     _, patients = load_frames()
-    return _at_risk_payload(patients, load_edges(), limit)
+    return _at_risk_payload(patients, load_edges(), limit, load_bridge_state())
 
 
 @app.get("/candidates/{patient_id}")
 def candidates(patient_id: str, limit: int = 20):
-    _, patients = load_frames()
-    if get_patient(patients, patient_id) is None:
-        return {"error": "patient not found", "patientId": patient_id}
-    edges = load_edges()
     donors, patients = load_frames()
-    dmeta = donors.set_index("user_id")
-    show_by_id = dmeta["show_rate"].to_dict() if "show_rate" in donors.columns else {}
-    will_by_id = dmeta["willingness"].to_dict() if "willingness" in donors.columns else {}
-    name_by_id = dmeta["name"].to_dict() if "name" in donors.columns else {}
-    city_by_id = dmeta["city"].to_dict() if "city" in donors.columns else {}
     pat = get_patient(patients, patient_id)
-    sub = edges[edges["patient_id"] == patient_id].sort_values("score", ascending=False).head(limit)
-    cands = [{
-        "donorId": r.donor_id,
-        "name": name_by_id.get(r.donor_id),
-        "city": city_by_id.get(r.donor_id),
-        "score": round(float(r.score), 4),
-        "group": getattr(r, "donor_group", None),
-        "distanceKm": round(float(getattr(r, "distance_km", float("nan"))), 1)
-                      if pd.notna(getattr(r, "distance_km", float("nan"))) else None,
-        "showRate": round(float(show_by_id.get(r.donor_id, 0.8)), 3),
-        "willingness": round(float(will_by_id.get(r.donor_id, 0.5)), 3),
-        "slotTypeHint": "active" if i < config.BRIDGE_ACTIVE_TARGET else "buffer",
-    } for i, r in enumerate(sub.itertuples(index=False))]
-    return {"patientId": patient_id, "patientName": pat.get("name") if pat is not None else None,
-            "count": len(cands), "candidates": cands}
+    if pat is None:
+        raise HTTPException(status_code=404, detail="patient not found")
+    try:
+        cands = _ranked_candidates(patient_id, donors, load_edges(), limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"candidate ranking failed: {exc}") from exc
+    return {
+        "patientId": patient_id,
+        "patientName": pat.get("name"),
+        "count": len(cands),
+        "candidates": cands,
+    }
 
 
 class EmergencyMatchRequest(BaseModel):

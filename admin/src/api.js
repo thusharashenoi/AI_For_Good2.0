@@ -27,6 +27,7 @@ export const api = {
   stats: () => get("/stats"),
   requests: (limit = 20) => get(`/requests?limit=${limit}`),
   formBridge: (patientId) => post(`/bridges/form/${patientId}`, {}),
+  broadcastBridge: (bridgeId) => post(`/bridges/${bridgeId}/broadcast`, {}),
   bridges: () => get("/bridges"),
   bridge: (id) => get(`/bridges/${id}`),
   unbridged: () => get("/unbridged"),

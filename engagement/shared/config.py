@@ -18,13 +18,7 @@ from typing import Any, Dict
 logger = logging.getLogger("raktsetu.config")
 
 
-def _load_dotenv() -> None:
-    """Lightweight .env loader (no python-dotenv dependency).
-
-    Loads raktsetu/.env if present. Existing process env vars win, so SAM /
-    Lambda injected values are never overwritten.
-    """
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+def _load_dotenv_file(path: str) -> None:
     if not os.path.exists(path):
         return
     try:
@@ -37,7 +31,22 @@ def _load_dotenv() -> None:
                 key, val = key.strip(), val.strip().strip('"').strip("'")
                 os.environ.setdefault(key, val)
     except Exception as exc:  # never let env loading crash anything
-        logger.warning("Could not load .env: %s", exc)
+        logger.warning("Could not load .env from %s: %s", path, exc)
+
+
+def _load_dotenv() -> None:
+    """Lightweight .env loader (no python-dotenv dependency).
+
+    Loads repo-root ``.env`` then ``engagement/.env``. Existing process env
+    vars win, so SAM / Lambda injected values are never overwritten.
+    """
+    engagement_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(engagement_root)
+    for path in (
+        os.path.join(repo_root, ".env"),
+        os.path.join(engagement_root, ".env"),
+    ):
+        _load_dotenv_file(path)
 
 
 _load_dotenv()

@@ -71,7 +71,7 @@ def handler(event, context=None):
 
         for reply in replies:
             try:
-                twilio_client.send_whatsapp(phone, reply)
+                twilio_client.send_whatsapp_direct(phone, reply)
             except Exception as exc:
                 logger.exception("Failed to send WhatsApp reply: %s", exc)
 

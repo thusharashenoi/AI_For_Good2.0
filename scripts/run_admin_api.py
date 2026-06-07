@@ -1,9 +1,13 @@
 """Run the Admin API locally with uvicorn.
 
-Usage:  STAGE=dev .venv/bin/python -m scripts.run_admin_api
-Then open http://127.0.0.1:8000/docs
+Usage:  .venv/bin/python -m scripts.run_admin_api
+Then open http://127.0.0.1:8000/docs  (Admin UI proxies /api -> :8000)
 """
 from __future__ import annotations
+
+from scripts.bootstrap_env import bootstrap
+
+bootstrap()
 
 import uvicorn
 

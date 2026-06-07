@@ -334,6 +334,33 @@ def get_bridge(bridge_id: str) -> list[dict]:
     return resp.get("Items", [])
 
 
+def confirm_bridge_donor(bridge_id: str, donor_id: str, status: str = "PENDING") -> bool:
+    """Mark a bridge slot as agreed after WhatsApp outreach completes."""
+    for it in get_bridge(bridge_id):
+        sk = str(it.get("SK", ""))
+        if not sk.startswith("SLOT#") or it.get("donorId") != donor_id:
+            continue
+        slot_id = sk.split("#", 1)[-1]
+        put_slot(
+            bridge_id, slot_id, it.get("slotType", "active"), status,
+            donor_id=donor_id,
+            score=float(it["score"]) if it.get("score") is not None else None,
+            reason=it.get("reason"),
+            patient_id=it.get("patientId"),
+            backup_for=it.get("backupFor"),
+        )
+        return True
+    return False
+
+
+def list_appointments(limit: int = 30) -> list[dict]:
+    if not _table_exists(config.TABLE_APPOINTMENTS):
+        return []
+    rows = [r for r in _scan_table(config.TABLE_APPOINTMENTS) if r.get("SK") == "APPT"]
+    rows.sort(key=lambda r: r.get("createdAt") or "", reverse=True)
+    return rows[:limit]
+
+
 def scan_bridges() -> list[dict]:
     table = _ddb.Table(config.TABLE_BRIDGES)
     items, kwargs = [], {}

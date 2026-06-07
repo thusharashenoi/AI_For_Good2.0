@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 
 from shared import (bedrock_client, config, dynamodb_client as db,
                     eligibility_rules as rules, geocoding, i18n, scheduler,
-                    twilio_client)
+                    twilio_client, whatsapp_ui)
 
 from . import validators as v
 
@@ -114,6 +114,10 @@ def handle_message(phone: str, text: str, channel: str = "whatsapp") -> List[str
     _push_history(conv, "user", text)
     lang = conv.get("language", i18n.DEFAULT_LANG)
 
+    # Bridge mobilization YES/NO — always wins over in-progress eligibility flows.
+    if conv.get("awaitingOutreachReply"):
+        return _handle_outreach_reply(conv, text)
+
     # Global commands ------------------------------------------------------
     if text.upper().replace(" ", "") in {"DELETEMYDATA", "DELETE"}:
         return _handle_delete(conv)
@@ -166,12 +170,13 @@ def _handle_outreach_reply(conv: Dict, text: str) -> List[str]:
     conv["awaitingOutreachReply"] = False
     request_id = conv.get("activeRequestId")
     if v.is_yes(text):
-        # Begin fast eligibility check (FLOW 5).
         conv["state"] = ELIG_DIABETES
         _ctx(conv)["medicalFlags"] = {}
+        if conv.get("bridgeOutreach"):
+            return _reply(conv, whatsapp_ui.eligibility_question(lang, "ASK_DIABETES", 1, len(ELIG_SEQUENCE)))
         return _reply(conv,
                       i18n.t("ELIGIBILITY_CHECK_START", lang),
-                      i18n.t("ASK_DIABETES", lang))
+                      whatsapp_ui.eligibility_question(lang, "ASK_DIABETES", 1, len(ELIG_SEQUENCE)))
     if v.is_later(text):
         conv["awaitingSnoozeDate"] = True
         conv["state"] = UNKNOWN
@@ -537,10 +542,10 @@ def _state_eligibility(conv: Dict, text: str) -> List[str]:
     flags[flag] = v.is_yes(text)
 
     if next_state == BOOKING_APPOINTMENT:
-        # All questions answered -> evaluate deferral.
         return _evaluate_and_book(conv)
     conv["state"] = next_state
-    return _reply(conv, i18n.t(next_question_key, lang))
+    step = next(i for i, s in enumerate(ELIG_SEQUENCE, start=1) if s[0] == next_state)
+    return _reply(conv, whatsapp_ui.eligibility_question(lang, next_question_key, step, len(ELIG_SEQUENCE)))
 
 
 def _evaluate_and_book(conv: Dict) -> List[str]:
@@ -566,6 +571,28 @@ def _evaluate_and_book(conv: Dict) -> List[str]:
         donor["medicalFlags"] = flags
         donor["eligibilityStatus"] = "eligible"
         db.save_donor(donor)
+
+    if conv.get("bridgeOutreach"):
+        req = db.get_request(conv.get("activeRequestId")) if conv.get("activeRequestId") else None
+        req = req or {}
+        from shared.datetime_utils import default_appointment_slot
+        appt_date, appt_time = default_appointment_slot(
+            None, None, required_by=req.get("requiredBy"))
+        _ctx(conv)["proposedAppointment"] = {
+            "hospital": req.get("hospital", "Blood Warriors partner hospital"),
+            "date": appt_date,
+            "time": appt_time,
+        }
+        ctx = _ctx(conv)
+        pre = i18n.t(
+            "BRIDGE_ELIGIBLE_BOOKED", lang,
+            donorName=ctx.get("bridgeDonorName") or (donor or {}).get("name") or "Donor",
+            bloodGroup=ctx.get("bridgeDonorGroup") or (donor or {}).get("bloodGroup") or "-",
+            city=ctx.get("bridgeDonorCity") or (donor or {}).get("city") or "Hyderabad",
+        )
+        appt_msgs = _confirm_appointment(conv)
+        conv["bridgeOutreach"] = False
+        return _reply(conv, pre, *appt_msgs)
 
     # Build proposed appointment from the active request.
     req = db.get_request(conv.get("activeRequestId")) if conv.get("activeRequestId") else None
@@ -608,6 +635,21 @@ def _state_different_date(conv: Dict, text: str) -> List[str]:
     return _confirm_appointment(conv)
 
 
+def _mark_bridge_slot_confirmed(bridge_id: str | None, donor_id: str | None) -> None:
+    if not bridge_id or not donor_id:
+        return
+    try:
+        import sys
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[3]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from raktsetu import store
+        store.confirm_bridge_donor(bridge_id, donor_id, "PENDING")
+    except Exception as exc:
+        logger.warning("Bridge slot confirm failed: %s", exc)
+
+
 def _confirm_appointment(conv: Dict) -> List[str]:
     lang = conv["language"]
     proposed = _ctx(conv).get("proposedAppointment", {})
@@ -620,24 +662,26 @@ def _confirm_appointment(conv: Dict) -> List[str]:
     appt = {
         "appointmentId": appt_id,
         "donorId": donor_id,
-        "patientId": req.get("patientId"),
-        "requestId": req.get("requestId"),
+        "patientId": req.get("patientId") or conv.get("bridgePatientId"),
+        "requestId": req.get("requestId") or conv.get("activeRequestId"),
         "donorPhone": conv["phone_number"],
         "patientPhone": req.get("patientPhone"),
-        "donorName": (donor or {}).get("name"),
-        "patientName": req.get("patientName"),
+        "donorName": (donor or {}).get("name") or _ctx(conv).get("bridgeDonorName"),
+        "patientName": req.get("patientName") or _ctx(conv).get("bridgePatientName"),
         "hospital": proposed.get("hospital", req.get("hospital")),
-        "city": req.get("city"),
+        "city": req.get("city") or _ctx(conv).get("bridgeDonorCity"),
         "appointmentDate": proposed.get("date"),
         "appointmentTime": proposed.get("time", "10:00 AM"),
-        "bloodGroup": (donor or {}).get("bloodGroup"),
+        "bloodGroup": (donor or {}).get("bloodGroup") or _ctx(conv).get("bridgeDonorGroup"),
         "status": "scheduled",
         "donorConfirmedDayBefore": False,
         "channel": conv.get("channel", "whatsapp"),
+        "bridgeId": conv.get("bridgeId"),
         "createdAt": db.now_iso(),
     }
     db.save_appointment(appt)
     conv["activeAppointmentId"] = appt_id
+    _mark_bridge_slot_confirmed(conv.get("bridgeId"), donor_id)
 
     # Update request.
     if req:

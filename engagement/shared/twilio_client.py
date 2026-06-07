@@ -37,6 +37,26 @@ def _wa(number: str) -> str:
     return f"whatsapp:{number}"
 
 
+def send_whatsapp_direct(to: str, body: str, media_url: Optional[str] = None) -> Dict:
+    """Send via Twilio WhatsApp API (ignores WA_PROVIDER=periskope).
+
+    Use for mobilization broadcasts where the sender must be TWILIO_WHATSAPP_NUMBER
+    (e.g. +919076150904) and the recipient is a separate demo/coordinator phone.
+    """
+    from_number = config.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+919076150904")
+    record = {"channel": "whatsapp", "to": _wa(to), "from": _wa(from_number),
+              "body": body, "mediaUrl": media_url, "at": time.time()}
+    if config.LOCAL_MODE:
+        OUTBOX.append(record)
+        logger.info("[LOCAL WA direct] -> %s: %s", to, body)
+        return {"sid": f"LOCAL-{len(OUTBOX)}", "ok": True, **record}
+    kwargs = {"from_": _wa(from_number), "to": _wa(to), "body": body}
+    if media_url:
+        kwargs["media_url"] = [media_url]
+    msg = _twilio().messages.create(**kwargs)
+    return {"sid": msg.sid, "ok": True, **record}
+
+
 def send_whatsapp(to: str, body: str, media_url: Optional[str] = None) -> Dict:
     """Send a free-form WhatsApp message (only valid inside the 24h window).
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -180,8 +181,31 @@ T = config.table_names
 
 
 # --- Conversations ---
+def phone_keys(phone: str) -> List[str]:
+    """Lookup keys for a phone — DynamoDB may store +91… or digits-only."""
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return []
+    keys: List[str] = []
+    seen: set[str] = set()
+    for candidate in (phone, f"+{digits}", digits):
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            keys.append(candidate)
+    return keys
+
+
+def canonical_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    return f"+{digits}" if digits else phone
+
+
 def get_conversation(phone: str) -> Optional[dict]:
-    return get_item(T()["conversations"], "phone_number", phone)
+    for key in phone_keys(phone):
+        hit = get_item(T()["conversations"], "phone_number", key)
+        if hit:
+            return hit
+    return None
 
 
 def save_conversation(conv: dict) -> dict:

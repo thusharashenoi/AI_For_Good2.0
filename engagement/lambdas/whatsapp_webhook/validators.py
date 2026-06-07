@@ -51,7 +51,7 @@ def is_yes(text: str) -> bool:
 
 def is_no(text: str) -> bool:
     t = _norm(text)
-    return t in NO_WORDS or t.startswith("no ") or t == "no" or t.startswith("❌")
+    return t in NO_WORDS or t.startswith("no ") or t == "no" or t.startswith("❌") or t in {"n", "0"}
 
 
 def is_later(text: str) -> bool:

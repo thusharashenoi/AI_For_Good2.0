@@ -126,5 +126,39 @@ def get_patient(patients: pd.DataFrame, patient_id: str) -> pd.Series | None:
     return None if hit.empty else hit.iloc[0]
 
 
+def bridge_commitment_count(bridge: dict) -> int:
+    """Donors who agreed (CONFIRMED/PENDING slots) — active + buffer fill."""
+    return int(bridge.get("active", 0)) + int(bridge.get("buffer", 0))
+
+
+def bridge_has_commitment(bridge: dict) -> bool:
+    return bridge_commitment_count(bridge) >= 1
+
+
+def patient_bridge_id(pat: pd.Series) -> str | None:
+    bid = pat.get("bridge_id")
+    if bid is None or pd.isna(bid) or str(bid) in ("nan", "None", ""):
+        return None
+    return str(bid)
+
+
+def is_patient_committed_bridged(pat: pd.Series, bridge_state: dict[str, dict]) -> bool:
+    """True once at least one donor has agreed to the patient's bridge."""
+    bid = patient_bridge_id(pat)
+    if not bid:
+        return False
+    b = bridge_state.get(bid)
+    return b is not None and bridge_has_commitment(b)
+
+
+def is_patient_unbridged(pat: pd.Series, bridge_state: dict[str, dict]) -> bool:
+    return not is_patient_committed_bridged(pat, bridge_state)
+
+
+def committed_bridges(state: dict[str, dict]) -> dict[str, dict]:
+    """Bridges with at least one agreed donor — eligible for Bridge health."""
+    return {bid: b for bid, b in state.items() if bridge_has_commitment(b)}
+
+
 def state_machine_arn() -> str | None:
     return os.environ.get("OUTREACH_STATE_MACHINE_ARN")
